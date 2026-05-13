@@ -44,7 +44,7 @@ For more information, consult the man page (`man perf-intel-pt`), and [this blog
 Convert the trace into `pt-fuser`'s internal format:
 
 ```bash
-perf script -i <PERF_FILE> --itrace=bei0ns --dlfilter=./target/release/libtransform_trace.so --dlarg=<SYMBOL_REGEX> --dlarg=<OUTPUT_DIR> [--dlarg=<TRACE_LIMIT>]
+perf --no-pager script -i <PERF_FILE> --itrace=bei0ns --dlfilter=./target/release/libtransform_trace.so --dlarg=<SYMBOL_REGEX> --dlarg=<OUTPUT_DIR> [--dlarg=<TRACE_LIMIT>]
 ```
 
 - `SYMBOL_REGEX`: a regular expression matching the function in your application that you are interested in. It will be the top-level frame in the resulting trace.
