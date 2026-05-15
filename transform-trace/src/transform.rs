@@ -3,7 +3,9 @@ use std::{
 };
 
 use pt_fuser::trace::{
-    Frame, SymbolInfo, Trace, TraceError, builder::{BuilderResult, TraceBuilder}, metrics::Metrics
+    Frame, SymbolInfo, Trace, TraceError,
+    builder::{BuilderResult, PausedTraceBuilder, TraceBuilder},
+    metrics::Metrics,
 };
 use regex::Regex;
 use threadpool::ThreadPool;
@@ -34,14 +36,18 @@ fn contained_in_callstack(builder: &TraceBuilder, addr: u64) -> Option<usize> {
     None
 }
 
+enum BuilderState {
+    InProgress(TraceBuilder),
+    Paused(PausedTraceBuilder),
+}
+
 pub(crate) struct State {
     sym_regex: Regex,
     output_dir: String,
     traces_limit: Option<u32>,
     trace_nums: HashMap<i32, u32>,
-    builders: HashMap<i32, TraceBuilder>,
-    insn_cnt: u64,
-    cyc_cnt: u64,
+    builders: HashMap<i32, BuilderState>,
+    cur_metrics: Metrics,
 }
 
 impl State {
@@ -52,8 +58,7 @@ impl State {
             traces_limit,
             trace_nums: HashMap::new(),
             builders: HashMap::new(),
-            insn_cnt: 0,
-            cyc_cnt: 0,
+            cur_metrics: Metrics::constant(0),
         }
     }
 }
@@ -99,9 +104,10 @@ pub(crate) fn process_insn_event(
     sample: &perf::perf_dlfilter_sample,
     _ctx: *mut c_void,
 ) {
-    state.insn_cnt += 1;
-    state.cyc_cnt += sample.cyc_cnt;
-    if let Some(builder) = state.builders.get(&sample.tid) {
+    state.cur_metrics.insn_count += 1;
+    state.cur_metrics.cycles += sample.cyc_cnt;
+    state.cur_metrics.ts = sample.time;
+    if let Some(BuilderState::InProgress(builder)) = state.builders.get(&sample.tid) {
         let current_symbol = builder.get_frame_symbol(0);
         if current_symbol.offset != 0 && !current_symbol.contains(sample.ip) {
             warn!(
@@ -113,19 +119,15 @@ pub(crate) fn process_insn_event(
     }
 }
 
-fn process_return_event(state: &mut State, sample: &perf::perf_dlfilter_sample, levels: usize) {
-    let cur_metrics = Metrics {
-        ts: sample.time,
-        cycles: state.cyc_cnt,
-        insn_count: state.insn_cnt,
-    };
-
-    let mut builder = Some(state.builders.remove(&sample.tid).unwrap());
-    for _ in 1..=levels {
-        match builder
-            .take()
-            .expect("Builder should exist since we should have incomplete frames left")
-            .complete_frame(cur_metrics)
+fn process_return_event(
+    mut builder: TraceBuilder,
+    state: &mut State,
+    sample: &perf::perf_dlfilter_sample,
+    levels: usize,
+) -> Option<TraceBuilder> {
+    for i in 1..=levels {
+        builder = match builder
+            .complete_frame(state.cur_metrics)
             .expect("Failed to complete stack frame")
         {
             BuilderResult::Completed(trace) => {
@@ -141,23 +143,26 @@ fn process_return_event(state: &mut State, sample: &perf::perf_dlfilter_sample, 
                         .len()
                 );
                 export_trace(state, sample.tid, trace);
+                if i != levels {
+                    warn!(
+                        "At time {}, tried returning {} levels but trace ended after {} levels.",
+                        sample.time, levels, i
+                    );
+                }
+                return None;
             }
-            BuilderResult::Builder(builder_result) => {
-                builder = Some(builder_result);
-            }
+            BuilderResult::Builder(builder_result) => builder_result,
         }
     }
-    if let Some(builder) = builder {
-        state.builders.insert(sample.tid, builder);
-    }
+    Some(builder)
 }
 
 fn process_call_event(
+    mut builder: TraceBuilder,
     state: &mut State,
     sample: &perf::perf_dlfilter_sample,
     call_target: SymbolInfo,
-) {
-    let builder = state.builders.get_mut(&sample.tid).unwrap();
+) -> Option<TraceBuilder> {
     let root_frame = builder.get_frame_symbol(builder.callstack_depth() - 1);
     if &call_target == root_frame {
         error!(
@@ -167,15 +172,11 @@ fn process_call_event(
             repair, so we will end it now.",
             sample.time
         );
-        let callstack_depth = builder.callstack_depth();
-        process_return_event(state, sample, callstack_depth);
+        let depth = builder.callstack_depth();
+        process_return_event(builder, state, sample, depth)
     } else {
-        let cur_metrics = Metrics {
-            ts: sample.time,
-            cycles: state.cyc_cnt,
-            insn_count: state.insn_cnt,
-        };
-        builder.push_frame(cur_metrics, call_target);
+        builder.push_frame(state.cur_metrics, call_target);
+        Some(builder)
     }
 }
 
@@ -183,7 +184,7 @@ pub(crate) fn process_branch_event(
     state: &mut State,
     sample: &perf::perf_dlfilter_sample,
     ctx: *mut c_void,
-) {
+) -> bool {
     let target_symbol = unsafe { crate::resolve_addr(sample, ctx) };
     let target_symbol = if let Some(sym) = target_symbol {
         unsafe { crate::normalize_symbol_addr(sample, sym, ctx) }
@@ -191,13 +192,15 @@ pub(crate) fn process_branch_event(
         fallback_symbol()
     };
 
-    let cur_metrics = Metrics {
-        ts: sample.time,
-        cycles: state.cyc_cnt,
-        insn_count: state.insn_cnt,
-    };
+    if sample.flags & perf::PERF_DLFILTER_FLAG_TRACE_BEGIN != 0 {
+        // trace begins anew on an error or when the process was unscheduled
+        // in either case, an instruction branch does not precede so we must update timestamps
+        state.cur_metrics.insn_count += 1;
+        state.cur_metrics.cycles += sample.cyc_cnt;
+        state.cur_metrics.ts = sample.time;
+    }
 
-    let builder = state.builders.get_mut(&sample.tid);
+    let builder_state = state.builders.remove(&sample.tid);
 
     // How we handle [unknown] frames
     // ------------------------------
@@ -226,26 +229,46 @@ pub(crate) fn process_branch_event(
     //    else -> call
     //       (handles indirect function calls)
 
-    if let Some(builder) = builder {
-        if sample.ip == 0 {
-            builder.event_occured(TraceError::DataCollectionError as u32, cur_metrics);
-        }
+    if let Some(builder_state) = builder_state {
+        let mut builder = match builder_state {
+            BuilderState::InProgress(mut builder) => {
+                if sample.flags & perf::PERF_DLFILTER_FLAG_TRACE_BEGIN != 0 {
+                    // TRACE_BEGIN without a previous TRACE_END indicates an error in the trace
+                    builder
+                        .event_occured(TraceError::DataCollectionError as u32, state.cur_metrics);
+                }
+                builder
+            }
+            BuilderState::Paused(paused) => {
+                if sample.flags & perf::PERF_DLFILTER_FLAG_TRACE_BEGIN == 0 {
+                    error!(
+                        "Expected TRACE_BEGIN before receiving other events at time {}.",
+                        sample.time
+                    );
+                }
+                paused.resume(state.cur_metrics)
+            }
+        };
 
         let current_symbol = builder.get_frame_symbol(0);
 
-        if current_symbol.offset == 0 {
+        let resulting_builder = if current_symbol.offset == 0 {
             if target_symbol.offset != 0 {
-                if let Some(levels) = contained_in_callstack(builder, sample.addr) {
-                    process_return_event(state, sample, levels);
+                if let Some(levels) = contained_in_callstack(&mut builder, sample.addr) {
+                    process_return_event(builder, state, sample, levels)
                 } else {
-                    process_return_event(state, sample, 2);
-                    if state.builders.contains_key(&sample.tid) {
-                        process_call_event(state, sample, target_symbol);
+                    let temp_builder = process_return_event(builder, state, sample, 2);
+                    if let Some(builder) = temp_builder {
+                        process_call_event(builder, state, sample, target_symbol)
+                    } else {
+                        None
                     }
                 }
+            } else {
+                Some(builder)
             }
         } else if !current_symbol.contains(sample.addr) {
-            let returning_levels = contained_in_callstack(builder, sample.addr).or(
+            let returning_levels = contained_in_callstack(&mut builder, sample.addr).or(
                 if (sample.flags & perf::PERF_DLFILTER_FLAG_RETURN) != 0
                     && builder.callstack_depth() == 1
                 {
@@ -256,28 +279,53 @@ pub(crate) fn process_branch_event(
             );
 
             if (sample.flags & perf::PERF_DLFILTER_FLAG_CALL) != 0 || returning_levels.is_none() {
-                process_call_event(state, sample, target_symbol);
+                process_call_event(builder, state, sample, target_symbol)
             } else if let Some(returning_levels) = returning_levels {
-                process_return_event(state, sample, returning_levels);
+                process_return_event(builder, state, sample, returning_levels)
+            } else {
+                Some(builder)
+            }
+        } else {
+            Some(builder)
+        };
+
+        // if resulting_builder is None, then trace is over and our work is done
+        if let Some(builder) = resulting_builder {
+            if sample.flags & perf::PERF_DLFILTER_FLAG_TRACE_END != 0 {
+                let paused = builder
+                    .pause(state.cur_metrics)
+                    .expect("Failed to pause TraceBuilder");
+                state
+                    .builders
+                    .insert(sample.tid, BuilderState::Paused(paused));
+            } else {
+                state
+                    .builders
+                    .insert(sample.tid, BuilderState::InProgress(builder));
             }
         }
-    } else if target_symbol.offset != 0
-        && state.sym_regex.is_match(&target_symbol.name)
-        && (state.traces_limit.is_none() || state.traces_limit.unwrap() > 0)
-    {
+    } else if target_symbol.offset != 0 && state.sym_regex.is_match(&target_symbol.name) {
+        if state.traces_limit.is_some() && state.traces_limit.unwrap() == 0 {
+            return false;
+        }
+
         info!(
             "Starting trace: tid={}, symbol={}",
             sample.tid, target_symbol.name
         );
         state.traces_limit = state.traces_limit.map(|limit| limit - 1);
-        let mut new_builder = TraceBuilder::new(cur_metrics, target_symbol);
+        let mut new_builder = TraceBuilder::new(state.cur_metrics, target_symbol);
         new_builder.new_event(
             TraceError::DataCollectionError as u32,
             "Errors".to_string(),
             "Trace decoder hit an error. Callstacks may be corrupted.".to_string(),
         );
-        state.builders.insert(sample.tid, new_builder);
+        state
+            .builders
+            .insert(sample.tid, BuilderState::InProgress(new_builder));
     }
+
+    true
 }
 
 pub(crate) fn finish_exporting() {

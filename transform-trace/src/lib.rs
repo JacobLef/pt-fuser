@@ -80,7 +80,10 @@ pub unsafe extern "C" fn filter_event_early(
     if event_ltr == 'i' {
         transform::process_insn_event(state, sample, ctx);
     } else if event_ltr == 'b' {
-        transform::process_branch_event(state, sample, ctx);
+        if !transform::process_branch_event(state, sample, ctx) {
+            // ECANCELED to signal that we are done processing the trace
+            return -125;
+        }
     }
     1
 }

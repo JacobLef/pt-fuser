@@ -35,6 +35,7 @@ pub struct TraceBuilder {
 pub struct PausedTraceBuilder {
     events: Vec<Event>,
     prev_segments: Vec<NamedFrame>,
+    current_stack: Vec<SymbolInfo>,
 }
 
 impl TraceBuilder {
@@ -51,23 +52,28 @@ impl TraceBuilder {
     }
 
     pub fn new(start_metrics: Metrics, symbol: SymbolInfo) -> Self {
-        Self::new_resume(start_metrics, symbol, Vec::new(), Vec::new())
+        Self::new_resume(start_metrics, vec![symbol], Vec::new(), Vec::new())
     }
 
     fn new_resume(
         start_metrics: Metrics,
-        symbol: SymbolInfo,
+        current_stack: Vec<SymbolInfo>,
         events: Vec<Event>,
         prev_segments: Vec<NamedFrame>,
     ) -> Self {
-        Self {
-            last_metrics: start_metrics,
-            current_frame: IncompleteFrame {
+        let mut current_stack = current_stack
+            .iter()
+            .map(|sym| IncompleteFrame {
                 start_metrics,
                 child_frames: Vec::new(),
-                symbol,
-            },
-            callstack: Vec::new(),
+                symbol: sym.clone(),
+            })
+            .collect::<Vec<_>>();
+        let current_frame = current_stack.pop().unwrap();
+        Self {
+            last_metrics: start_metrics,
+            current_frame,
+            callstack: current_stack,
             events,
             prev_segments,
         }
@@ -140,10 +146,17 @@ impl TraceBuilder {
     }
 
     pub fn pause(mut self, metrics: Metrics) -> Result<PausedTraceBuilder, trace::Error> {
+        let mut current_stack = self
+            .callstack
+            .iter()
+            .map(|frame| frame.symbol.clone())
+            .collect::<Vec<_>>();
+        current_stack.push(self.current_frame.symbol.clone());
+
         let mut curr_frame = self.current_frame;
-        while let Some(prev) = self.callstack.pop() {
+        while let Some(mut prev) = self.callstack.pop() {
             let completed_frame = curr_frame.complete(metrics)?;
-            self.prev_segments.push(completed_frame);
+            prev.child_frames.push(completed_frame);
             curr_frame = prev;
         }
 
@@ -151,13 +164,19 @@ impl TraceBuilder {
         Ok(PausedTraceBuilder {
             events: self.events,
             prev_segments: self.prev_segments,
+            current_stack,
         })
     }
 }
 
 impl PausedTraceBuilder {
-    pub fn resume(self, start_metrics: Metrics, symbol: SymbolInfo) -> TraceBuilder {
-        TraceBuilder::new_resume(start_metrics, symbol, self.events, self.prev_segments)
+    pub fn resume(self, start_metrics: Metrics) -> TraceBuilder {
+        TraceBuilder::new_resume(
+            start_metrics,
+            self.current_stack,
+            self.events,
+            self.prev_segments,
+        )
     }
 }
 
@@ -169,7 +188,24 @@ pub enum BuilderResult {
 #[cfg(test)]
 mod test {
     use super::*;
-    use trace::test::{INNER_RANGE1, INNER_RANGE2, METRICS_ONE, SAMPLE_RANGE, TEST_SYMBOL};
+    use trace::{
+        Chunk,
+        test::{INNER_RANGE1, INNER_RANGE2, METRICS_ONE, SAMPLE_RANGE, TEST_SYMBOL},
+    };
+
+    fn extract_builder(result: BuilderResult) -> TraceBuilder {
+        match result {
+            BuilderResult::Builder(builder) => builder,
+            BuilderResult::Completed(_) => panic!("Expected builder, got completed trace"),
+        }
+    }
+
+    fn extract_frame_chunk<F: Frame>(chunk: &Chunk<F>) -> &F {
+        match chunk {
+            Chunk::Frame(frame) => frame,
+            _ => panic!("Expected frame chunk"),
+        }
+    }
 
     #[test]
     fn complete_empty_frame() {
@@ -221,13 +257,6 @@ mod test {
         }
     }
 
-    fn extract_builder(result: BuilderResult) -> TraceBuilder {
-        match result {
-            BuilderResult::Builder(builder) => builder,
-            BuilderResult::Completed(_) => panic!("Expected builder, got completed trace"),
-        }
-    }
-
     #[test]
     fn build_trace_nested() {
         let mut builder = TraceBuilder::new(SAMPLE_RANGE.start, TEST_SYMBOL.clone());
@@ -243,14 +272,8 @@ mod test {
                 match trace.root.chunks()[0] {
                     trace::Chunk::Frame(ref frame) => {
                         assert_eq!(frame.chunks().len(), 4);
-                        assert!(matches!(
-                            &frame.chunks()[0],
-                            trace::Chunk::Straightline(_)
-                        ));
-                        assert!(matches!(
-                            &frame.chunks()[2],
-                            trace::Chunk::Straightline(_)
-                        ));
+                        assert!(matches!(&frame.chunks()[0], trace::Chunk::Straightline(_)));
+                        assert!(matches!(&frame.chunks()[2], trace::Chunk::Straightline(_)));
 
                         match &frame.chunks()[1] {
                             trace::Chunk::Frame(frame) => {
@@ -295,6 +318,69 @@ mod test {
                 }
             }
             BuilderResult::Builder(_) => panic!("Expected trace to be completed"),
+        }
+    }
+
+    #[test]
+    fn build_trace_pauses() {
+        let builder = TraceBuilder::new(SAMPLE_RANGE.start, TEST_SYMBOL.clone());
+        let paused = builder.pause(SAMPLE_RANGE.start + METRICS_ONE).unwrap();
+        let mut resumed = paused.resume(INNER_RANGE1.start);
+
+        resumed.push_frame(INNER_RANGE1.start + METRICS_ONE, TEST_SYMBOL.clone());
+        let paused = resumed.pause(INNER_RANGE1.end).unwrap();
+
+        let resumed = paused.resume(INNER_RANGE2.start);
+        let builder = extract_builder(
+            resumed
+                .complete_frame(INNER_RANGE2.end - METRICS_ONE)
+                .unwrap(),
+        );
+
+        match builder.complete_frame(INNER_RANGE2.end).unwrap() {
+            BuilderResult::Builder(_) => panic!("Expected completed trace"),
+            BuilderResult::Completed(trace) => {
+                assert_eq!(trace.root_frame().chunks().len(), 5);
+                assert_eq!(
+                    trace.root_frame().metrics(),
+                    &MetricsRange::new(SAMPLE_RANGE.start, INNER_RANGE2.end)
+                );
+
+                let frame1 = extract_frame_chunk(&trace.root_frame().chunks()[0]);
+                assert_eq!(frame1.chunks().len(), 1);
+                assert_eq!(
+                    frame1.metrics(),
+                    &MetricsRange::new(SAMPLE_RANGE.start, SAMPLE_RANGE.start + METRICS_ONE)
+                );
+
+                let frame2 = extract_frame_chunk(&trace.root_frame().chunks()[2]);
+                assert_eq!(frame2.chunks().len(), 2);
+                assert_eq!(
+                    frame2.metrics(),
+                    &MetricsRange::new(INNER_RANGE1.start, INNER_RANGE1.end)
+                );
+
+                let nested_frame1 = extract_frame_chunk(&frame2.chunks()[1]);
+                assert_eq!(nested_frame1.chunks().len(), 1);
+                assert_eq!(
+                    nested_frame1.metrics(),
+                    &MetricsRange::new(INNER_RANGE1.start + METRICS_ONE, INNER_RANGE1.end)
+                );
+
+                let frame3 = extract_frame_chunk(&trace.root_frame().chunks()[4]);
+                assert_eq!(frame3.chunks().len(), 2);
+                assert_eq!(
+                    frame3.metrics(),
+                    &MetricsRange::new(INNER_RANGE2.start, INNER_RANGE2.end)
+                );
+
+                let nested_frame2 = extract_frame_chunk(&frame3.chunks()[0]);
+                assert_eq!(nested_frame2.chunks().len(), 1);
+                assert_eq!(
+                    nested_frame2.metrics(),
+                    &MetricsRange::new(INNER_RANGE2.start, INNER_RANGE2.end - METRICS_ONE)
+                );
+            }
         }
     }
 
