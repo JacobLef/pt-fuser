@@ -3,22 +3,24 @@ pub mod histogram;
 
 use crate::trace::{Chunk, Frame};
 
-pub struct FrameFinder<'a, 'b, F>
+pub struct FrameFinder<'a, 'b, F, P>
 where
-    F: Fn(&'a Frame) -> bool,
+    F: Frame<ChildFrame = F>,
+    P: Fn(&F) -> bool,
 {
-    curr_frame: &'a Frame,
+    curr_frame: &'a F,
     child_index: usize,
-    child_frame_finder: Option<Box<FrameFinder<'a, 'b, F>>>,
-    pred: &'b F,
+    child_frame_finder: Option<Box<FrameFinder<'a, 'b, F, P>>>,
+    pred: &'b P,
     produced_self: bool,
 }
 
-impl<'a, 'b, F> FrameFinder<'a, 'b, F>
+impl<'a, 'b, F, P> FrameFinder<'a, 'b, F, P>
 where
-    F: Fn(&'a Frame) -> bool,
+    F: Frame<ChildFrame = F>,
+    P: Fn(&F) -> bool,
 {
-    pub fn new(root: &'a Frame, pred: &'b F) -> FrameFinder<'a, 'b, F> {
+    pub fn new(root: &'a F, pred: &'b P) -> FrameFinder<'a, 'b, F, P> {
         FrameFinder {
             curr_frame: root,
             child_index: 0,
@@ -29,11 +31,12 @@ where
     }
 }
 
-impl<'a, 'b, F> Iterator for FrameFinder<'a, 'b, F>
+impl<'a, 'b, F, P> Iterator for FrameFinder<'a, 'b, F, P>
 where
-    F: Fn(&'a Frame) -> bool,
+    F: Frame<ChildFrame = F>,
+    P: Fn(&F) -> bool,
 {
-    type Item = &'a Frame;
+    type Item = &'a F;
 
     fn next(&mut self) -> Option<Self::Item> {
         if !self.produced_self {

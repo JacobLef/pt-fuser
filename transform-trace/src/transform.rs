@@ -3,9 +3,7 @@ use std::{
 };
 
 use pt_fuser::trace::{
-    SymbolInfo, Trace, TraceError,
-    builder::{BuilderResult, TraceBuilder},
-    metrics::Metrics,
+    Frame, SymbolInfo, Trace, TraceError, builder::{BuilderResult, TraceBuilder}, metrics::Metrics
 };
 use regex::Regex;
 use threadpool::ThreadPool;
@@ -134,8 +132,8 @@ fn process_return_event(state: &mut State, sample: &perf::perf_dlfilter_sample, 
                 info!(
                     "Completed trace for tid={}. Trace ran from {} to {} and had {} errors.",
                     sample.tid,
-                    trace.root_frame().metrics.start.ts,
-                    trace.root_frame().metrics.end.ts,
+                    trace.root_frame().metrics().start.ts,
+                    trace.root_frame().metrics().end.ts,
                     trace
                         .get_event(TraceError::DataCollectionError as u32)
                         .unwrap()

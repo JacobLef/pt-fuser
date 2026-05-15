@@ -8,7 +8,7 @@ use perfetto_rust::{
 };
 use prost::Message;
 
-use crate::trace::{Chunk, Frame, Trace};
+use crate::trace::{Chunk, Frame, NamedFrame, Trace};
 
 // These IDs are arbitrary but must be used consistently
 const TRACE_TRACK_ID: u64 = 10;
@@ -123,7 +123,7 @@ impl Converter {
         }
     }
 
-    fn process_frame(&mut self, frame: &Frame) -> Vec<TracePacket> {
+    fn process_frame(&mut self, frame: &NamedFrame) -> Vec<TracePacket> {
         let mut packets = Vec::new();
 
         let mut intern_data = None;
@@ -146,7 +146,7 @@ impl Converter {
                 self.last_iid
             });
 
-        let mut slice_begin = create_slice_begin(frame.metrics.start.ts, iid);
+        let mut slice_begin = create_slice_begin(frame.metrics().start.ts, iid);
         slice_begin.interned_data = intern_data;
         packets.push(slice_begin);
 
@@ -157,7 +157,7 @@ impl Converter {
             }
         }
 
-        let slice_end = create_slice_end(frame.metrics.end.ts);
+        let slice_end = create_slice_end(frame.metrics().end.ts);
         packets.push(slice_end);
 
         packets
@@ -166,7 +166,13 @@ impl Converter {
 
 pub fn convert_to_perfetto(trace: &Trace) -> Vec<u8> {
     let mut converter = Converter::new();
-    let mut packets = converter.process_frame(trace.root_frame());
+    let mut packets = Vec::new();
+    for chunk in trace.root_frame().chunks() {
+        match chunk {
+            Chunk::Frame(frame) => packets.extend(converter.process_frame(frame)),
+            Chunk::Straightline(_) => continue,
+        }
+    }
 
     let trace_start = create_trace_track_start();
     packets.insert(0, trace_start);

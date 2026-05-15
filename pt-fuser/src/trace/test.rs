@@ -56,15 +56,15 @@ pub(crate) const METRICS_ONE: Metrics = Metrics {
 /// Creates a trace with no events and a root frame that has five chunks:
 /// child frame, straightline, child frame, straightline, child frame
 fn test_trace() -> Trace {
-    let mut outer = Frame::new(SAMPLE_RANGE, TEST_SYMBOL.clone());
-    let middle = Frame::new(INNER_RANGE1, TEST_SYMBOL.clone());
+    let mut outer = RootFrame::new(SAMPLE_RANGE);
+    let middle = NamedFrame::new(INNER_RANGE1, TEST_SYMBOL.clone());
     outer.add_child(middle).unwrap();
-    let beginning = Frame::new(
+    let beginning = NamedFrame::new(
         MetricsRange::new(SAMPLE_RANGE.start, INNER_RANGE1.start - METRICS_ONE),
         TEST_SYMBOL.clone(),
     );
     outer.add_child(beginning).unwrap();
-    let end = Frame::new(
+    let end = NamedFrame::new(
         MetricsRange::new(INNER_RANGE1.end + METRICS_ONE, SAMPLE_RANGE.end),
         TEST_SYMBOL.clone(),
     );
@@ -75,7 +75,7 @@ fn test_trace() -> Trace {
 
 #[test]
 fn range_totals() {
-    let frame = Chunk::Frame(Frame::new(SAMPLE_RANGE, TEST_SYMBOL.clone()));
+    let frame = Chunk::Frame(NamedFrame::new(SAMPLE_RANGE, TEST_SYMBOL.clone()));
     assert_eq!(SAMPLE_RANGE.total_time(), 100);
     assert_eq!(SAMPLE_RANGE.total_cycles(), 300);
     assert_eq!(SAMPLE_RANGE.total_insn(), 800);
@@ -86,7 +86,10 @@ fn range_totals() {
 
 #[test]
 fn zero_duration_frame() {
-    let frame = MetricsRange::new(SAMPLE_RANGE.start, SAMPLE_RANGE.start);
+    let frame = Chunk::Frame(NamedFrame::new(
+        MetricsRange::new(SAMPLE_RANGE.start, SAMPLE_RANGE.start),
+        TEST_SYMBOL.clone(),
+    ));
     assert_eq!(frame.total_time(), 0);
     assert_eq!(frame.total_cycles(), 0);
     assert_eq!(frame.total_insn(), 0);
@@ -94,13 +97,13 @@ fn zero_duration_frame() {
 
 #[test]
 fn empty_frame_invariant() {
-    let frame = Frame::new(SAMPLE_RANGE, TEST_SYMBOL.clone());
+    let frame = NamedFrame::new(SAMPLE_RANGE, TEST_SYMBOL.clone());
     assert!(frame.check_invariant());
 }
 
 #[test]
 fn fails_invariant() {
-    let mut frame = Frame::new(SAMPLE_RANGE, TEST_SYMBOL.clone());
+    let mut frame = RootFrame::<NamedFrame>::new(SAMPLE_RANGE);
     match &mut frame.chunks[0] {
         Chunk::Frame(_) => unreachable!(),
         Chunk::Straightline(straightline) => {
@@ -112,9 +115,9 @@ fn fails_invariant() {
 
 #[test]
 fn child_frame_invariant() {
-    let mut frame = Frame::new(SAMPLE_RANGE, TEST_SYMBOL.clone());
-    let child1 = Frame::new(INNER_RANGE1, TEST_SYMBOL.clone());
-    let child2 = Frame::new(INNER_RANGE2, TEST_SYMBOL.clone());
+    let mut frame = RootFrame::<NamedFrame>::new(SAMPLE_RANGE);
+    let child1 = NamedFrame::new(INNER_RANGE1, TEST_SYMBOL.clone());
+    let child2 = NamedFrame::new(INNER_RANGE2, TEST_SYMBOL.clone());
     frame.add_child(child1).unwrap();
     frame.add_child(child2).unwrap();
     assert!(frame.check_invariant());
@@ -122,8 +125,8 @@ fn child_frame_invariant() {
 
 #[test]
 fn child_overlaps_parent() {
-    let mut outer = Frame::new(SAMPLE_RANGE, TEST_SYMBOL.clone());
-    let inner = Frame::new(SAMPLE_RANGE, TEST_SYMBOL.clone());
+    let mut outer = RootFrame::new(SAMPLE_RANGE);
+    let inner = NamedFrame::new(SAMPLE_RANGE, TEST_SYMBOL.clone());
     outer.add_child(inner).unwrap();
     assert_eq!(outer.chunks.len(), 1);
     assert!(outer.check_invariant());
@@ -144,12 +147,12 @@ fn child_overlapping_complex() {
 
 #[test]
 fn add_invalid_child() {
-    let mut frame = Frame::new(SAMPLE_RANGE, TEST_SYMBOL.clone());
-    let too_early = Frame::new(
+    let mut frame = RootFrame::new(SAMPLE_RANGE);
+    let too_early = NamedFrame::new(
         MetricsRange::new(SAMPLE_RANGE.start - METRICS_ONE, INNER_RANGE1.end),
         TEST_SYMBOL.clone(),
     );
-    let too_late = Frame::new(
+    let too_late = NamedFrame::new(
         MetricsRange::new(INNER_RANGE2.start, SAMPLE_RANGE.end + METRICS_ONE),
         TEST_SYMBOL.clone(),
     );
@@ -159,17 +162,17 @@ fn add_invalid_child() {
 
 #[test]
 fn add_child_no_space() {
-    let mut outer = Frame::new(SAMPLE_RANGE, TEST_SYMBOL.clone());
-    let middle = Frame::new(INNER_RANGE1, TEST_SYMBOL.clone());
+    let mut outer = RootFrame::new(SAMPLE_RANGE);
+    let middle = NamedFrame::new(INNER_RANGE1, TEST_SYMBOL.clone());
     outer.add_child(middle).unwrap();
-    let beginning = Frame::new(
+    let beginning = NamedFrame::new(
         MetricsRange::new(
             SAMPLE_RANGE.start + METRICS_ONE,
             INNER_RANGE1.start + METRICS_ONE,
         ),
         TEST_SYMBOL.clone(),
     );
-    let end = Frame::new(
+    let end = NamedFrame::new(
         MetricsRange::new(
             INNER_RANGE1.end - METRICS_ONE,
             SAMPLE_RANGE.end - METRICS_ONE,
@@ -182,8 +185,8 @@ fn add_child_no_space() {
 
 #[test]
 fn add_child_instant() {
-    let mut outer = Frame::new(SAMPLE_RANGE, TEST_SYMBOL.clone());
-    let child = Frame::new(
+    let mut outer = RootFrame::new(SAMPLE_RANGE);
+    let child = NamedFrame::new(
         MetricsRange::new(
             SAMPLE_RANGE.start + METRICS_ONE,
             SAMPLE_RANGE.start + METRICS_ONE,
@@ -195,14 +198,14 @@ fn add_child_instant() {
 
 #[test]
 fn add_child_nested_instant() {
-    let mut outer = Frame::new(SAMPLE_RANGE, TEST_SYMBOL.clone());
+    let mut outer = RootFrame::new(SAMPLE_RANGE);
     let range = MetricsRange::new(
         SAMPLE_RANGE.start + METRICS_ONE,
         SAMPLE_RANGE.start + METRICS_ONE,
     );
-    let mut child1 = Frame::new(range.clone(), TEST_SYMBOL.clone());
-    let mut child2 = Frame::new(range.clone(), TEST_SYMBOL.clone());
-    let child3 = Frame::new(range.clone(), TEST_SYMBOL.clone());
+    let mut child1 = NamedFrame::new(range.clone(), TEST_SYMBOL.clone());
+    let mut child2 = NamedFrame::new(range.clone(), TEST_SYMBOL.clone());
+    let child3 = NamedFrame::new(range.clone(), TEST_SYMBOL.clone());
     assert!(child2.add_child(child3).is_ok());
     assert!(child1.add_child(child2).is_ok());
     assert!(outer.add_child(child1).is_ok());
@@ -210,27 +213,27 @@ fn add_child_nested_instant() {
 
 #[test]
 fn add_child_multiple_instant() {
-    let mut outer = Frame::new(SAMPLE_RANGE, TEST_SYMBOL.clone());
+    let mut outer = RootFrame::new(SAMPLE_RANGE);
     let range = MetricsRange::new(
         SAMPLE_RANGE.start + METRICS_ONE,
         SAMPLE_RANGE.start + METRICS_ONE,
     );
-    let child1 = Frame::new(range.clone(), TEST_SYMBOL.clone());
-    let child2 = Frame::new(range.clone(), TEST_SYMBOL.clone());
+    let child1 = NamedFrame::new(range.clone(), TEST_SYMBOL.clone());
+    let child2 = NamedFrame::new(range.clone(), TEST_SYMBOL.clone());
     assert!(outer.add_child(child1).is_ok());
     assert!(outer.add_child(child2).is_ok());
 }
 
 #[test]
 fn add_child_multiple_nested_instant() {
-    let mut outer = Frame::new(SAMPLE_RANGE, TEST_SYMBOL.clone());
+    let mut outer = RootFrame::new(SAMPLE_RANGE);
     let range = MetricsRange::new(
         SAMPLE_RANGE.start + METRICS_ONE,
         SAMPLE_RANGE.start + METRICS_ONE,
     );
-    let mut child1 = Frame::new(range.clone(), TEST_SYMBOL.clone());
-    let child2 = Frame::new(range.clone(), TEST_SYMBOL.clone());
-    let child3 = Frame::new(range.clone(), TEST_SYMBOL.clone());
+    let mut child1 = NamedFrame::new(range.clone(), TEST_SYMBOL.clone());
+    let child2 = NamedFrame::new(range.clone(), TEST_SYMBOL.clone());
+    let child3 = NamedFrame::new(range.clone(), TEST_SYMBOL.clone());
     assert!(child1.add_child(child2).is_ok());
     assert!(child1.add_child(child3).is_ok());
     assert!(outer.add_child(child1).is_ok());
@@ -238,13 +241,13 @@ fn add_child_multiple_nested_instant() {
 
 #[test]
 fn add_child_adjacent_ends_no_straightline() {
-    let mut outer = Frame::new(SAMPLE_RANGE, TEST_SYMBOL.clone());
-    let child1 = Frame::new(SAMPLE_RANGE, TEST_SYMBOL.clone());
-    let beginning = Frame::new(
+    let mut outer = RootFrame::new(SAMPLE_RANGE);
+    let child1 = NamedFrame::new(SAMPLE_RANGE, TEST_SYMBOL.clone());
+    let beginning = NamedFrame::new(
         MetricsRange::new(SAMPLE_RANGE.start, SAMPLE_RANGE.start),
         TEST_SYMBOL.clone(),
     );
-    let end = Frame::new(
+    let end = NamedFrame::new(
         MetricsRange::new(SAMPLE_RANGE.end, SAMPLE_RANGE.end),
         TEST_SYMBOL.clone(),
     );
@@ -270,8 +273,8 @@ fn add_adjacent_start_invariant() {
         cycles: 200,
         insn_count: 200,
     };
-    let mut outer = Frame::new(MetricsRange::new(start, end), TEST_SYMBOL.clone());
-    let child = Frame::new(
+    let mut outer = RootFrame::new(MetricsRange::new(start, end));
+    let child = NamedFrame::new(
         MetricsRange::new(start_off, start_off + METRICS_ONE),
         TEST_SYMBOL.clone(),
     );
@@ -296,8 +299,8 @@ fn add_adjacent_end_invariant() {
         cycles: 190,
         insn_count: 190,
     };
-    let mut outer = Frame::new(MetricsRange::new(start, end), TEST_SYMBOL.clone());
-    let child = Frame::new(
+    let mut outer = RootFrame::new(MetricsRange::new(start, end));
+    let child = NamedFrame::new(
         MetricsRange::new(end_off - METRICS_ONE, end_off),
         TEST_SYMBOL.clone(),
     );
@@ -319,7 +322,7 @@ fn event_sorts() {
 
 #[test]
 fn find_event() {
-    let frame = Frame::new(SAMPLE_RANGE, TEST_SYMBOL.clone());
+    let frame = RootFrame::new(SAMPLE_RANGE);
     let trace = Trace::new(
         frame,
         vec![

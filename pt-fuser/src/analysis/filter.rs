@@ -1,10 +1,10 @@
-use std::str::FromStr;
+use std::{iter, str::FromStr};
 
 use regex::Regex;
 
 use crate::{
     analysis::FrameFinder,
-    trace::{Frame, Trace, TraceError},
+    trace::{Chunk, Event, Frame, NamedFrame, Trace, TraceError},
 };
 
 #[derive(Debug, Clone)]
@@ -90,56 +90,69 @@ impl FromStr for Filter {
     }
 }
 
+fn run_filter<'a, F: Frame + 'a>(
+    frames: impl IntoIterator<Item = &'a F>,
+    filter: &Filter,
+    errors: Option<&Event>,
+) -> bool {
+    let mut num_errors = 0;
+    let mut error_index = 0;
+    for frame in frames {
+        if let Some(duration_min) = filter.duration_min {
+            if frame.metrics().total_time() < duration_min {
+                return false;
+            }
+        }
+        if let Some(duration_max) = filter.duration_max {
+            if frame.metrics().total_time() > duration_max {
+                return false;
+            }
+        }
+
+        if let Some(error_events) = errors {
+            let error_events = error_events.occurences();
+            while error_index < error_events.len()
+                && error_events[error_index] < frame.metrics().end
+            {
+                if error_events[error_index] >= frame.metrics().start {
+                    num_errors += 1;
+                }
+                error_index += 1;
+            }
+        }
+    }
+
+    if let Some(errors_min) = filter.errors_min {
+        if num_errors < errors_min {
+            return false;
+        }
+    }
+    if let Some(errors_max) = filter.errors_max {
+        if num_errors > errors_max {
+            return false;
+        }
+    }
+
+    true
+}
+
 pub fn filter_traces(mut traces: Vec<Trace>, filter: &Filter) -> Vec<Trace> {
     traces.retain(|trace| {
-        let pred = |frame: &Frame| {
-            if let Some(target) = &filter.target {
-                target.is_match(&frame.symbol.name)
-            } else {
-                frame == trace.root_frame()
-            }
-        };
-        let frame_finder = FrameFinder::new(trace.root_frame(), &pred);
-        let mut num_errors = 0;
-        let mut error_index = 0;
         let error_events = trace.get_event(TraceError::DataCollectionError as u32);
-        for frame in frame_finder {
-            if let Some(duration_min) = filter.duration_min {
-                if frame.metrics.total_time() < duration_min {
-                    return false;
-                }
-            }
-            if let Some(duration_max) = filter.duration_max {
-                if frame.metrics.total_time() > duration_max {
-                    return false;
+        if let Some(target) = &filter.target {
+            let pred = |frame: &NamedFrame| target.is_match(&frame.symbol.name);
+            let mut frame_finders = Vec::new();
+            for chunk in trace.root_frame().chunks() {
+                if let Chunk::Frame(frame) = chunk {
+                    let frame_finder = FrameFinder::new(frame, &pred);
+                    frame_finders.push(frame_finder);
                 }
             }
 
-            if let Some(error_events) = error_events {
-                let error_events = error_events.occurences();
-                while error_index < error_events.len()
-                    && error_events[error_index] < frame.metrics.end
-                {
-                    if error_events[error_index] >= frame.metrics.start {
-                        num_errors += 1;
-                    }
-                    error_index += 1;
-                }
-            }
+            run_filter(frame_finders.into_iter().flatten(), filter, error_events)
+        } else {
+            run_filter(iter::once(trace.root_frame()), filter, error_events)
         }
-
-        if let Some(errors_min) = filter.errors_min {
-            if num_errors < errors_min {
-                return false;
-            }
-        }
-        if let Some(errors_max) = filter.errors_max {
-            if num_errors > errors_max {
-                return false;
-            }
-        }
-
-        true
     });
     traces
 }

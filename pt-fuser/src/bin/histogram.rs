@@ -5,7 +5,7 @@ use pt_fuser::{
         filter::{self, Filter},
         histogram::HistogramApp,
     },
-    trace::{Frame, Trace, TraceError},
+    trace::{Chunk, Event, Frame, NamedFrame, Trace, TraceError},
 };
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use regex::Regex;
@@ -37,6 +37,39 @@ struct Cli {
     input_files: Vec<String>,
 }
 
+fn add_histogram_datapoint<'a, F: Frame + 'a>(
+    frames: impl IntoIterator<Item = &'a F>,
+    error_event: Option<&Event>,
+    data: &mut Vec<f64>,
+    action: &Action,
+) {
+    match action {
+        Action::Error => {
+            let Some(errors) = error_event else {
+                data.push(0f64);
+                return;
+            };
+            let errors = errors.occurences();
+            let mut error_index = 0;
+            let mut num_errors = 0;
+            for frame in frames {
+                while error_index < errors.len() && errors[error_index] < frame.metrics().end {
+                    if errors[error_index] >= frame.metrics().start {
+                        num_errors += 1;
+                    }
+                    error_index += 1;
+                }
+            }
+            data.push(num_errors as f64);
+        }
+        Action::Latency => {
+            for frame in frames {
+                data.push(frame.metrics().total_time() as f64);
+            }
+        }
+    }
+}
+
 fn main() -> eframe::Result<()> {
     let cli = Cli::parse();
 
@@ -61,38 +94,29 @@ fn main() -> eframe::Result<()> {
 
     let mut data = Vec::new();
     for trace in &traces {
-        let pred = |f: &Frame| {
-            if let Some(regex) = &regex {
-                regex.is_match(&f.symbol.name)
-            } else {
-                f == trace.root_frame()
-            }
-        };
-        let frame_finder = FrameFinder::new(trace.root_frame(), &pred);
-        match cli.action {
-            Action::Error => {
-                let Some(errors) = trace.get_event(TraceError::DataCollectionError as u32) else {
-                    data.push(0f64);
-                    continue;
-                };
-                let errors = errors.occurences();
-                let mut error_index = 0;
-                let mut num_errors = 0;
-                for frame in frame_finder {
-                    while error_index < errors.len() && errors[error_index] < frame.metrics.end {
-                        if errors[error_index] >= frame.metrics.start {
-                            num_errors += 1;
-                        }
-                        error_index += 1;
-                    }
-                }
-                data.push(num_errors as f64);
-            }
-            Action::Latency => {
-                for frame in frame_finder {
-                    data.push(frame.metrics.total_time() as f64);
+        let error_event = trace.get_event(TraceError::DataCollectionError as u32);
+        if let Some(regex) = &regex {
+            let pred = |f: &NamedFrame| regex.is_match(&f.symbol.name);
+            let mut frame_finders = Vec::new();
+            for chunk in trace.root_frame().chunks() {
+                if let Chunk::Frame(frame) = chunk {
+                    let frame_finder = FrameFinder::new(frame, &pred);
+                    frame_finders.push(frame_finder);
                 }
             }
+            add_histogram_datapoint(
+                frame_finders.into_iter().flatten(),
+                error_event,
+                &mut data,
+                &cli.action,
+            );
+        } else {
+            add_histogram_datapoint(
+                std::iter::once(trace.root_frame()),
+                error_event,
+                &mut data,
+                &cli.action,
+            );
         }
     }
 
