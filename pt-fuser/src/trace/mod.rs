@@ -1,5 +1,6 @@
 pub mod builder;
 pub mod metrics;
+pub mod trace_error;
 
 #[cfg(test)]
 mod test;
@@ -60,7 +61,11 @@ pub struct RootFrame<F: Frame> {
 
 impl<F: Frame> Display for RootFrame<F> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Unnamed Frame ({} - {})", self.metrics.start, self.metrics.end)
+        write!(
+            f,
+            "Unnamed Frame ({} - {})",
+            self.metrics.start, self.metrics.end
+        )
     }
 }
 
@@ -162,7 +167,13 @@ pub struct NamedFrame {
 
 impl Display for NamedFrame {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{} ({} - {})", self.symbol, self.metrics().start, self.metrics().end)
+        write!(
+            f,
+            "{} ({} - {})",
+            self.symbol,
+            self.metrics().start,
+            self.metrics().end
+        )
     }
 }
 
@@ -341,11 +352,6 @@ impl Trace {
         };
         flexbuffers::from_slice(&decoded_data)
     }
-}
-
-pub enum TraceError {
-    DataCollectionError = 1,
-    LostFrameWhileMerging = 555740177,
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]

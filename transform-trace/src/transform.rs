@@ -3,9 +3,10 @@ use std::{
 };
 
 use pt_fuser::trace::{
-    Frame, SymbolInfo, Trace, TraceError,
+    Frame, SymbolInfo, Trace,
     builder::{BuilderResult, PausedTraceBuilder, TraceBuilder},
     metrics::Metrics,
+    trace_error,
 };
 use regex::Regex;
 use threadpool::ThreadPool;
@@ -137,7 +138,7 @@ fn process_return_event(
                     trace.root_frame().metrics().start.ts,
                     trace.root_frame().metrics().end.ts,
                     trace
-                        .get_event(TraceError::DataCollectionError as u32)
+                        .get_event(trace_error::DataCollectionError::ID)
                         .unwrap()
                         .occurences()
                         .len()
@@ -234,8 +235,7 @@ pub(crate) fn process_branch_event(
             BuilderState::InProgress(mut builder) => {
                 if sample.flags & perf::PERF_DLFILTER_FLAG_TRACE_BEGIN != 0 {
                     // TRACE_BEGIN without a previous TRACE_END indicates an error in the trace
-                    builder
-                        .event_occured(TraceError::DataCollectionError as u32, state.cur_metrics);
+                    builder.event_occured(trace_error::DataCollectionError::ID, state.cur_metrics);
                 }
                 builder
             }
@@ -290,8 +290,12 @@ pub(crate) fn process_branch_event(
         };
 
         // if resulting_builder is None, then trace is over and our work is done
-        if let Some(builder) = resulting_builder {
+        if let Some(mut builder) = resulting_builder {
             if sample.flags & perf::PERF_DLFILTER_FLAG_TRACE_END != 0 {
+                if sample.flags & perf::PERF_DLFILTER_FLAG_ASYNC != 0 {
+                    builder.event_occured(trace_error::TraceInterrupted::ID, state.cur_metrics);
+                }
+
                 let paused = builder
                     .pause(state.cur_metrics)
                     .expect("Failed to pause TraceBuilder");
@@ -316,9 +320,14 @@ pub(crate) fn process_branch_event(
         state.traces_limit = state.traces_limit.map(|limit| limit - 1);
         let mut new_builder = TraceBuilder::new(state.cur_metrics, target_symbol);
         new_builder.new_event(
-            TraceError::DataCollectionError as u32,
-            "Errors".to_string(),
-            "Trace decoder hit an error. Callstacks may be corrupted.".to_string(),
+            trace_error::DataCollectionError::ID,
+            trace_error::DataCollectionError::NAME.to_string(),
+            trace_error::DataCollectionError::DESC.to_string(),
+        );
+        new_builder.new_event(
+            trace_error::TraceInterrupted::ID,
+            trace_error::TraceInterrupted::NAME.to_string(),
+            trace_error::TraceInterrupted::DESC.to_string(),
         );
         state
             .builders

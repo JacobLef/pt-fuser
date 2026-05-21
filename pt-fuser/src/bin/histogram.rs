@@ -5,15 +5,16 @@ use pt_fuser::{
         filter::{self, Filter},
         histogram::HistogramApp,
     },
-    trace::{Chunk, Event, Frame, NamedFrame, Trace, TraceError},
+    trace::{Chunk, Frame, NamedFrame, Trace, trace_error},
 };
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use regex::Regex;
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum, Debug)]
 enum Action {
-    Error,
+    Errors,
     Latency,
+    Interrupts,
 }
 
 #[derive(Parser)]
@@ -39,12 +40,18 @@ struct Cli {
 
 fn add_histogram_datapoint<'a, F: Frame + 'a>(
     frames: impl IntoIterator<Item = &'a F>,
-    error_event: Option<&Event>,
+    trace: &Trace,
     data: &mut Vec<f64>,
     action: &Action,
 ) {
+    let error_event = match action {
+        Action::Errors => trace.get_event(trace_error::DataCollectionError::ID),
+        Action::Interrupts => trace.get_event(trace_error::TraceInterrupted::ID),
+        Action::Latency => None,
+    };
+
     match action {
-        Action::Error => {
+        Action::Errors | Action::Interrupts => {
             let Some(errors) = error_event else {
                 data.push(0f64);
                 return;
@@ -94,7 +101,6 @@ fn main() -> eframe::Result<()> {
 
     let mut data = Vec::new();
     for trace in &traces {
-        let error_event = trace.get_event(TraceError::DataCollectionError as u32);
         if let Some(regex) = &regex {
             let pred = |f: &NamedFrame| regex.is_match(&f.symbol.name);
             let mut frame_finders = Vec::new();
@@ -106,14 +112,14 @@ fn main() -> eframe::Result<()> {
             }
             add_histogram_datapoint(
                 frame_finders.into_iter().flatten(),
-                error_event,
+                trace,
                 &mut data,
                 &cli.action,
             );
         } else {
             add_histogram_datapoint(
                 std::iter::once(trace.root_frame()),
-                error_event,
+                trace,
                 &mut data,
                 &cli.action,
             );
@@ -122,7 +128,7 @@ fn main() -> eframe::Result<()> {
 
     let options = eframe::NativeOptions::default();
     let app = match cli.action {
-        Action::Error => HistogramApp::new(
+        Action::Errors => HistogramApp::new(
             format!("Error Count Distribution of {} traces", traces.len()),
             &data,
             "Error Count".into(),
@@ -132,6 +138,12 @@ fn main() -> eframe::Result<()> {
             format!("Latency Distribution of {} traces", traces.len()),
             &data,
             "Latency (ns)".into(),
+            "Count".into(),
+        ),
+        Action::Interrupts => HistogramApp::new(
+            format!("Interrupt Count Distribution of {} traces", traces.len()),
+            &data,
+            "Interrupt Count".into(),
             "Count".into(),
         ),
     };

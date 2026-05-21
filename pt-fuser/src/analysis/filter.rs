@@ -4,32 +4,37 @@ use regex::Regex;
 
 use crate::{
     analysis::FrameFinder,
-    trace::{Chunk, Event, Frame, NamedFrame, Trace, TraceError},
+    trace::{Chunk, Event, Frame, NamedFrame, Trace, metrics::MetricsRange, trace_error},
 };
 
 #[derive(Debug, Clone)]
 pub struct Filter {
     pub target: Option<Regex>,
-    pub errors_min: Option<u32>,
-    pub errors_max: Option<u32>,
-    pub duration_min: Option<u64>,
-    pub duration_max: Option<u64>,
+    pub min_errors: Option<u32>,
+    pub max_errors: Option<u32>,
+    pub min_latency: Option<u64>,
+    pub max_latency: Option<u64>,
+    pub min_interrupts: Option<u32>,
+    pub max_interrupts: Option<u32>,
 }
 
 impl Filter {
-    pub const HELP: &'static str = "A filter in the form \"[target=regex,] [errors_min=num,] [errors_max=num,] \
-                                    [duration_min=num,] [duration_max=num]\". Traces with frames violating a filter \
-                                    are ignored. If target regex is not provided, filter applies to root frames.";
+    pub const HELP: &'static str = "A filter in the form \"[target=regex,] [min_errors=num,] [max_errors=num,] \
+                                    [min_latency=num,] [max_latency=num,] [min_interrupts=num,] [max_interrupts=num]\". \
+                                    Traces with frames violating a filter are ignored. If target regex is not \
+                                    provided, filter applies to root frames.";
 }
 
 impl Default for Filter {
     fn default() -> Self {
         Filter {
             target: None,
-            errors_min: None,
-            errors_max: None,
-            duration_min: None,
-            duration_max: None,
+            min_errors: None,
+            max_errors: None,
+            min_latency: None,
+            max_latency: None,
+            min_interrupts: None,
+            max_interrupts: None,
         }
     }
 }
@@ -53,32 +58,46 @@ impl FromStr for Filter {
                     filter.target =
                         Some(Regex::new(value).map_err(|e| format!("Invalid regex: {}", e))?);
                 }
-                "errors_min" => {
-                    filter.errors_min = Some(
+                "min_errors" => {
+                    filter.min_errors = Some(
                         value
                             .parse::<u32>()
-                            .map_err(|e| format!("Invalid number for errors_min: {}", e))?,
+                            .map_err(|e| format!("Invalid number for min_errors: {}", e))?,
                     );
                 }
-                "errors_max" => {
-                    filter.errors_max = Some(
+                "max_errors" => {
+                    filter.max_errors = Some(
                         value
                             .parse::<u32>()
-                            .map_err(|e| format!("Invalid number for errors_max: {}", e))?,
+                            .map_err(|e| format!("Invalid number for max_errors: {}", e))?,
                     );
                 }
-                "duration_min" => {
-                    filter.duration_min = Some(
+                "min_latency" => {
+                    filter.min_latency = Some(
                         value
                             .parse::<u64>()
-                            .map_err(|e| format!("Invalid number for duration_min: {}", e))?,
+                            .map_err(|e| format!("Invalid number for min_latency: {}", e))?,
                     );
                 }
-                "duration_max" => {
-                    filter.duration_max = Some(
+                "max_latency" => {
+                    filter.max_latency = Some(
                         value
                             .parse::<u64>()
-                            .map_err(|e| format!("Invalid number for duration_max: {}", e))?,
+                            .map_err(|e| format!("Invalid number for max_latency: {}", e))?,
+                    );
+                }
+                "min_interrupts" => {
+                    filter.min_interrupts = Some(
+                        value
+                            .parse::<u32>()
+                            .map_err(|e| format!("Invalid number for min_interrupts: {}", e))?,
+                    );
+                }
+                "max_interrupts" => {
+                    filter.max_interrupts = Some(
+                        value
+                            .parse::<u32>()
+                            .map_err(|e| format!("Invalid number for max_interrupts: {}", e))?,
                     );
                 }
                 _ => {
@@ -90,47 +109,65 @@ impl FromStr for Filter {
     }
 }
 
+fn scan_event(event: &Event, cur_index: &mut usize, metric_range: &MetricsRange) -> u32 {
+    let mut count = 0;
+    let occurences = event.occurences();
+    while *cur_index < occurences.len() && occurences[*cur_index] < metric_range.end {
+        if occurences[*cur_index] >= metric_range.start {
+            count += 1;
+        }
+        *cur_index += 1;
+    }
+    count
+}
+
 fn run_filter<'a, F: Frame + 'a>(
     frames: impl IntoIterator<Item = &'a F>,
     filter: &Filter,
-    errors: Option<&Event>,
+    trace: &Trace,
 ) -> bool {
+    let decoding_errors = trace.get_event(trace_error::DataCollectionError::ID);
+    let interrupts = trace.get_event(trace_error::TraceInterrupted::ID);
+
     let mut num_errors = 0;
     let mut error_index = 0;
+
+    let mut num_interrupts = 0;
+    let mut interrupt_index = 0;
+
     for frame in frames {
-        if let Some(duration_min) = filter.duration_min {
+        if let Some(duration_min) = filter.min_latency {
             if frame.metrics().total_time() < duration_min {
                 return false;
             }
         }
-        if let Some(duration_max) = filter.duration_max {
+        if let Some(duration_max) = filter.max_latency {
             if frame.metrics().total_time() > duration_max {
                 return false;
             }
         }
 
-        if let Some(error_events) = errors {
-            let error_events = error_events.occurences();
-            while error_index < error_events.len()
-                && error_events[error_index] < frame.metrics().end
-            {
-                if error_events[error_index] >= frame.metrics().start {
-                    num_errors += 1;
-                }
-                error_index += 1;
-            }
+        if let Some(decoding_errors) = decoding_errors {
+            num_errors += scan_event(decoding_errors, &mut error_index, frame.metrics());
+        }
+
+        if let Some(interrupts) = interrupts {
+            num_interrupts += scan_event(interrupts, &mut interrupt_index, frame.metrics());
         }
     }
 
-    if let Some(errors_min) = filter.errors_min {
-        if num_errors < errors_min {
-            return false;
-        }
+    if filter.min_errors.is_some() && num_errors < filter.min_errors.unwrap() {
+        return false;
     }
-    if let Some(errors_max) = filter.errors_max {
-        if num_errors > errors_max {
-            return false;
-        }
+    if filter.max_errors.is_some() && num_errors > filter.max_errors.unwrap() {
+        return false;
+    }
+
+    if filter.min_interrupts.is_some() && num_interrupts < filter.min_interrupts.unwrap() {
+        return false;
+    }
+    if filter.max_interrupts.is_some() && num_interrupts > filter.max_interrupts.unwrap() {
+        return false;
     }
 
     true
@@ -138,7 +175,6 @@ fn run_filter<'a, F: Frame + 'a>(
 
 pub fn filter_traces(mut traces: Vec<Trace>, filter: &Filter) -> Vec<Trace> {
     traces.retain(|trace| {
-        let error_events = trace.get_event(TraceError::DataCollectionError as u32);
         if let Some(target) = &filter.target {
             let pred = |frame: &NamedFrame| target.is_match(&frame.symbol.name);
             let mut frame_finders = Vec::new();
@@ -149,9 +185,9 @@ pub fn filter_traces(mut traces: Vec<Trace>, filter: &Filter) -> Vec<Trace> {
                 }
             }
 
-            run_filter(frame_finders.into_iter().flatten(), filter, error_events)
+            run_filter(frame_finders.into_iter().flatten(), filter, trace)
         } else {
-            run_filter(iter::once(trace.root_frame()), filter, error_events)
+            run_filter(iter::once(trace.root_frame()), filter, trace)
         }
     });
     traces

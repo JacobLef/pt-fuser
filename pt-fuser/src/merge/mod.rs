@@ -9,8 +9,9 @@ use std::{
 use tracing::{info, warn};
 
 use crate::trace::{
-    Chunk, Event, Frame, NamedFrame, RootFrame, Trace, TraceError,
+    Chunk, Event, Frame, NamedFrame, RootFrame, Trace,
     metrics::{Metrics, MetricsRange},
+    trace_error,
 };
 
 const FREQUENT_FRAME_THRESH: f32 = 0.7;
@@ -98,9 +99,9 @@ pub fn merge_traces(traces: &[&Trace]) -> Trace {
 
     if !lost_frame_occurences.is_empty() {
         let lost_frame_event = Event::from_occurences(
-            TraceError::LostFrameWhileMerging as u32,
-            "Lost Frames".to_string(),
-            "A frame could not be added because it overlapped with adjacent frames.".to_string(),
+            trace_error::LostFrameWhileMerging::ID,
+            trace_error::LostFrameWhileMerging::NAME.to_string(),
+            trace_error::LostFrameWhileMerging::DESC.to_string(),
             lost_frame_occurences,
         )
         .expect("Failed to create lost frame event");

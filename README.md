@@ -60,27 +60,27 @@ perf --no-pager script -i <PERF_FILE> --itrace=bei0ns --dlfilter=./target/releas
 First, create a histogram of latencies or error counts across all your traces:
 
 ```bash
-cargo run --bin histogram -- --gzip <lantency|error> </path/to/traces/*>
+cargo run --bin histogram -- --gzip <lantency|errors|interrupts> </path/to/traces/*>
 ```
 
-- `latency` will create a histogram of latencies (in nanoseconds) while `error` will create a histogram of Intel PT decoding errors (typically indicating lost data packets)
+- `latency` will create a histogram of latencies (in nanoseconds). `errors` will create a histogram of Intel PT decoding errors, typically lost data due to buffer overflow. `interrupts` will create a histogram of the number of times the trace was paused while the CPU serviced an interrupt.
 - `</path/to/traces/*>` is a list of trace files to be analyzed for the histogram
 - `--gzip` will uncompress the input file before trying to read it
 
 Then, you can develop a set of filters that excludes any perceived outliers. Each filter has the form:
 
 ```bash
-[target=regex,][errors_min=num,][errors_max=num,][duration_min=num,][duration_max=num]
+[target=regex,][min_errors=num,][max_errors=num,][min_latency=num,][max_latency=num]
 ```
 
 - `target`: a regular expression that determines which function to filter based on. If not provided, the filter is based on the top-level function in the trace.
-- `errors_min` and `errors_max`: exclude all traces with a function whose error count is outside of the provided range.
-- `duration_min` and `duration_max`: exclude all traces with a function whose latency is outside of the provided range.
+- `min_errors` and `max_errors`: exclude all traces with a function whose error count is outside of the provided range.
+- `min_latency` and `max_latency`: exclude all traces with a function whose latency is outside of the provided range.
 
 You can preview the effect of a filter by re-running the histogram command with the `--filter` option:
 
 ```bash
-cargo run --bin histogram -- --gzip <lantency|error> </path/to/traces/*> --filter <FILTER1> --filter <FILTER2> ...
+cargo run --bin histogram -- --gzip <lantency|errors> </path/to/traces/*> --filter <FILTER1> --filter <FILTER2> ...
 ```
 
 ### 4. Merge multiple traces into one averaged trace
