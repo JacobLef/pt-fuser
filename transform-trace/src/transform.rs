@@ -3,7 +3,7 @@ use std::{
 };
 
 use pt_fuser::trace::{
-    Frame, SymbolInfo, Trace,
+    SymbolInfo, Trace,
     builder::{BuilderResult, PausedTraceBuilder, TraceBuilder},
     metrics::Metrics,
     trace_error,
@@ -135,8 +135,8 @@ fn process_return_event(
                 info!(
                     "Completed trace for tid={}. Trace ran from {} to {} and had {} errors.",
                     sample.tid,
-                    trace.root_frame().metrics().start.ts,
-                    trace.root_frame().metrics().end.ts,
+                    trace.root_frame().metrics.start.ts,
+                    trace.root_frame().metrics.end.ts,
                     trace
                         .get_event(trace_error::DataCollectionError::ID)
                         .unwrap()

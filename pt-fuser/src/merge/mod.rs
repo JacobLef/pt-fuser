@@ -9,7 +9,7 @@ use std::{
 use tracing::{info, warn};
 
 use crate::trace::{
-    Chunk, Event, Frame, NamedFrame, RootFrame, Trace,
+    Chunk, Event, Frame, Trace,
     metrics::{Metrics, MetricsRange},
     trace_error,
 };
@@ -75,16 +75,19 @@ pub fn merge_traces(traces: &[&Trace]) -> Trace {
     let frames = traces
         .iter()
         .map(|t| t.root_frame())
-        .collect::<Vec<&RootFrame<NamedFrame>>>();
+        .collect::<Vec<&Frame>>();
 
     info!("Merging frames for {} traces...", traces.len());
 
     let new_end = frames
         .iter()
-        .map(|f| f.metrics().end - f.metrics().start)
+        .map(|f| f.metrics.end - f.metrics.start)
         .sum::<Metrics>()
         / (frames.len() as u64);
-    let mut new_root = RootFrame::new(MetricsRange::new(Metrics::constant(0), new_end));
+    let mut new_root = Frame::new(
+        MetricsRange::new(Metrics::constant(0), new_end),
+        traces[0].root_frame().symbol.clone(),
+    );
 
     let mut lost_frame_occurences = Vec::new();
     merge_children(
@@ -95,7 +98,7 @@ pub fn merge_traces(traces: &[&Trace]) -> Trace {
     );
     lost_frame_occurences.sort();
     info!("Merging events...");
-    let mut merged_events = merge_events(traces, new_root.metrics());
+    let mut merged_events = merge_events(traces, &new_root.metrics);
 
     if !lost_frame_occurences.is_empty() {
         let lost_frame_event = Event::from_occurences(
@@ -118,14 +121,14 @@ trait Id: Clone {
 }
 
 #[derive(Clone, Copy)]
-struct FrameIndexed<'a, F: Frame + Clone> {
-    original: &'a F,
+struct FrameIndexed<'a> {
+    original: &'a Frame,
     offset_in_parent: Metrics,
     // unique within a parent frame, stable across parent frames
     id: u32,
 }
 
-impl<F: Frame + Clone> Id for FrameIndexed<'_, F> {
+impl Id for FrameIndexed<'_> {
     fn id(&self) -> u32 {
         self.id
     }
@@ -145,9 +148,7 @@ struct IdMapKey<'a> {
 ///
 /// Returns N and a list of lists of indexed frames. Each list of indexed frames
 /// corresponds to the child frames of the original frame.
-fn index_children<'a, F: Frame<ChildFrame = NamedFrame>>(
-    frames: &[&'a F],
-) -> (u32, Vec<Vec<FrameIndexed<'a, NamedFrame>>>) {
+fn index_children<'a>(frames: &[&'a Frame]) -> (u32, Vec<Vec<FrameIndexed<'a>>>) {
     let mut indexed_children = Vec::with_capacity(frames.len());
     let mut symbol_ids: HashMap<IdMapKey, u32> = HashMap::new();
     let mut seen_symbols: HashMap<&str, u32> = HashMap::new();
@@ -173,7 +174,7 @@ fn index_children<'a, F: Frame<ChildFrame = NamedFrame>>(
 
                     children.push(FrameIndexed {
                         original: frame,
-                        offset_in_parent: frame.metrics().start - parent.metrics().start,
+                        offset_in_parent: frame.metrics.start - parent.metrics.start,
                         id: *id,
                     });
                 }
@@ -309,26 +310,25 @@ fn find_frequent_frames<I: Id>(n: u32, sequences: &[&[I]], thresh: f32) -> Vec<u
     result
 }
 
-fn add_within_bounds<F: Frame>(
-    frame: &mut F,
-    mut child: F::ChildFrame,
+fn add_within_bounds(
+    frame: &mut Frame,
+    mut child: Frame,
     min_metrics: &mut Metrics,
     max_metrics: &Metrics,
     lost_frame_occurrences: &mut Vec<Metrics>,
 ) {
-    let original_child_start = child.metrics().start.clone();
-    let child_metrics = child.metrics_mut();
-    child_metrics.start.ts = max(child_metrics.start.ts, min_metrics.ts);
-    child_metrics.start.cycles = max(child_metrics.start.cycles, min_metrics.cycles);
-    child_metrics.start.insn_count = max(child_metrics.start.insn_count, min_metrics.insn_count);
-    child_metrics.end.ts = min(child_metrics.end.ts, max_metrics.ts);
-    child_metrics.end.cycles = min(child_metrics.end.cycles, max_metrics.cycles);
-    child_metrics.end.insn_count = min(child_metrics.end.insn_count, max_metrics.insn_count);
-    if child_metrics.start.ts <= child_metrics.end.ts
-        && child_metrics.start.cycles <= child_metrics.end.cycles
-        && child_metrics.start.insn_count <= child_metrics.end.insn_count
+    let original_child_start = child.metrics.start.clone();
+    child.metrics.start.ts = max(child.metrics.start.ts, min_metrics.ts);
+    child.metrics.start.cycles = max(child.metrics.start.cycles, min_metrics.cycles);
+    child.metrics.start.insn_count = max(child.metrics.start.insn_count, min_metrics.insn_count);
+    child.metrics.end.ts = min(child.metrics.end.ts, max_metrics.ts);
+    child.metrics.end.cycles = min(child.metrics.end.cycles, max_metrics.cycles);
+    child.metrics.end.insn_count = min(child.metrics.end.insn_count, max_metrics.insn_count);
+    if child.metrics.start.ts <= child.metrics.end.ts
+        && child.metrics.start.cycles <= child.metrics.end.cycles
+        && child.metrics.start.insn_count <= child.metrics.end.insn_count
     {
-        *min_metrics = child_metrics.end;
+        *min_metrics = child.metrics.end;
         frame
             .add_child(child)
             .expect("Adding merged child frame should be valid");
@@ -341,21 +341,21 @@ fn add_within_bounds<F: Frame>(
     }
 }
 
-fn merge_child_recursively<F: Frame<ChildFrame = NamedFrame>>(
-    new_parent: &mut F,
-    to_merge: &[&F::ChildFrame],
+fn merge_child_recursively(
+    new_parent: &mut Frame,
+    to_merge: &[&Frame],
     offset_in_parent_sum: Metrics,
     frequent_thresh: f32,
     lost_frame_occurrences: &mut Vec<Metrics>,
-) -> F::ChildFrame {
-    let new_start = new_parent.metrics().start + offset_in_parent_sum / (to_merge.len() as u64);
+) -> Frame {
+    let new_start = new_parent.metrics.start + offset_in_parent_sum / (to_merge.len() as u64);
     let new_end = new_start
         + to_merge
             .iter()
-            .map(|f| f.metrics().end - f.metrics().start)
+            .map(|f| f.metrics.end - f.metrics.start)
             .sum::<Metrics>()
             / (to_merge.len() as u64);
-    let mut merged = NamedFrame::new(
+    let mut merged = Frame::new(
         MetricsRange::new(new_start, new_end),
         to_merge[0].symbol.clone(),
     );
@@ -369,20 +369,20 @@ fn merge_child_recursively<F: Frame<ChildFrame = NamedFrame>>(
     merged
 }
 
-fn merge_children<F: Frame<ChildFrame = NamedFrame>>(
-    new_parent: &mut F,
-    children: &[&F],
+fn merge_children(
+    new_parent: &mut Frame,
+    children: &[&Frame],
     lost_frame_occurrences: &mut Vec<Metrics>,
     frequent_thresh: f32,
 ) {
-    let mut min_metrics = new_parent.metrics().start;
-    let max_metrics = new_parent.metrics().end;
+    let mut min_metrics = new_parent.metrics.start;
+    let max_metrics = new_parent.metrics.end;
 
     let (n, indexed_children) = index_children(children);
     let mut sequences = indexed_children
         .iter()
         .map(|c| c.as_slice())
-        .collect::<Vec<&[FrameIndexed<NamedFrame>]>>();
+        .collect::<Vec<&[FrameIndexed]>>();
 
     let lcs = find_lcs(n, &sequences);
 
@@ -540,8 +540,8 @@ fn merge_events(traces: &[&Trace], new_range: &MetricsRange) -> Vec<Event> {
                     .filter_map(|trace| {
                         trace.events().iter().find_map(|e| {
                             if e.id == event.id {
-                                let trace_start = trace.root_frame().metrics().start;
-                                let trace_range = trace.root_frame().metrics().end - trace_start;
+                                let trace_start = trace.root_frame().metrics.start;
+                                let trace_range = trace.root_frame().metrics.end - trace_start;
                                 // scale each occurence so it is within new_range
                                 Some(e.occurences().iter().map(move |o| {
                                     new_range_len * (o - &trace_start) / trace_range

@@ -4,7 +4,7 @@ use regex::Regex;
 
 use crate::{
     analysis::FrameFinder,
-    trace::{Chunk, Event, Frame, NamedFrame, Trace, metrics::MetricsRange, trace_error},
+    trace::{Event, Frame, Trace, metrics::MetricsRange, trace_error},
 };
 
 #[derive(Debug, Clone)]
@@ -121,8 +121,8 @@ fn scan_event(event: &Event, cur_index: &mut usize, metric_range: &MetricsRange)
     count
 }
 
-fn run_filter<'a, F: Frame + 'a>(
-    frames: impl IntoIterator<Item = &'a F>,
+fn run_filter<'a>(
+    frames: impl IntoIterator<Item = &'a Frame>,
     filter: &Filter,
     trace: &Trace,
 ) -> bool {
@@ -137,22 +137,22 @@ fn run_filter<'a, F: Frame + 'a>(
 
     for frame in frames {
         if let Some(duration_min) = filter.min_latency {
-            if frame.metrics().total_time() < duration_min {
+            if frame.metrics.total_time() < duration_min {
                 return false;
             }
         }
         if let Some(duration_max) = filter.max_latency {
-            if frame.metrics().total_time() > duration_max {
+            if frame.metrics.total_time() > duration_max {
                 return false;
             }
         }
 
         if let Some(decoding_errors) = decoding_errors {
-            num_errors += scan_event(decoding_errors, &mut error_index, frame.metrics());
+            num_errors += scan_event(decoding_errors, &mut error_index, &frame.metrics);
         }
 
         if let Some(interrupts) = interrupts {
-            num_interrupts += scan_event(interrupts, &mut interrupt_index, frame.metrics());
+            num_interrupts += scan_event(interrupts, &mut interrupt_index, &frame.metrics);
         }
     }
 
@@ -176,16 +176,8 @@ fn run_filter<'a, F: Frame + 'a>(
 pub fn filter_traces(mut traces: Vec<Trace>, filter: &Filter) -> Vec<Trace> {
     traces.retain(|trace| {
         if let Some(target) = &filter.target {
-            let pred = |frame: &NamedFrame| target.is_match(&frame.symbol.name);
-            let mut frame_finders = Vec::new();
-            for chunk in trace.root_frame().chunks() {
-                if let Chunk::Frame(frame) = chunk {
-                    let frame_finder = FrameFinder::new(frame, &pred);
-                    frame_finders.push(frame_finder);
-                }
-            }
-
-            run_filter(frame_finders.into_iter().flatten(), filter, trace)
+            let pred = |frame: &Frame| target.is_match(&frame.symbol.name);
+            run_filter(FrameFinder::new(trace.root_frame(), &pred), filter, trace)
         } else {
             run_filter(iter::once(trace.root_frame()), filter, trace)
         }

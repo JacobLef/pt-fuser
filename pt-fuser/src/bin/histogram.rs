@@ -5,7 +5,7 @@ use pt_fuser::{
         filter::{self, Filter},
         histogram::HistogramApp,
     },
-    trace::{Chunk, Frame, NamedFrame, Trace, trace_error},
+    trace::{Frame, Trace, trace_error},
 };
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use regex::Regex;
@@ -38,8 +38,8 @@ struct Cli {
     input_files: Vec<String>,
 }
 
-fn add_histogram_datapoint<'a, F: Frame + 'a>(
-    frames: impl IntoIterator<Item = &'a F>,
+fn add_histogram_datapoint<'a>(
+    frames: impl IntoIterator<Item = &'a Frame>,
     trace: &Trace,
     data: &mut Vec<f64>,
     action: &Action,
@@ -60,8 +60,8 @@ fn add_histogram_datapoint<'a, F: Frame + 'a>(
             let mut error_index = 0;
             let mut num_errors = 0;
             for frame in frames {
-                while error_index < errors.len() && errors[error_index] < frame.metrics().end {
-                    if errors[error_index] >= frame.metrics().start {
+                while error_index < errors.len() && errors[error_index] < frame.metrics.end {
+                    if errors[error_index] >= frame.metrics.start {
                         num_errors += 1;
                     }
                     error_index += 1;
@@ -71,7 +71,7 @@ fn add_histogram_datapoint<'a, F: Frame + 'a>(
         }
         Action::Latency => {
             for frame in frames {
-                data.push(frame.metrics().total_time() as f64);
+                data.push(frame.metrics.total_time() as f64);
             }
         }
     }
@@ -102,16 +102,9 @@ fn main() -> eframe::Result<()> {
     let mut data = Vec::new();
     for trace in &traces {
         if let Some(regex) = &regex {
-            let pred = |f: &NamedFrame| regex.is_match(&f.symbol.name);
-            let mut frame_finders = Vec::new();
-            for chunk in trace.root_frame().chunks() {
-                if let Chunk::Frame(frame) = chunk {
-                    let frame_finder = FrameFinder::new(frame, &pred);
-                    frame_finders.push(frame_finder);
-                }
-            }
+            let pred = |f: &Frame| regex.is_match(&f.symbol.name);
             add_histogram_datapoint(
-                frame_finders.into_iter().flatten(),
+                FrameFinder::new(trace.root_frame(), &pred),
                 trace,
                 &mut data,
                 &cli.action,

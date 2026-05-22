@@ -38,109 +38,83 @@ impl Display for SymbolInfo {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct Straightline {
-    pub metrics: MetricsRange,
-}
-
-pub trait Frame: Display {
-    type ChildFrame: Frame;
-
-    fn metrics(&self) -> &MetricsRange;
-    fn metrics_mut(&mut self) -> &mut MetricsRange;
-    fn add_child(&mut self, child: Self::ChildFrame) -> Result<(), Error>;
-    fn chunks(&self) -> &[Chunk<Self::ChildFrame>];
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct RootFrame<F: Frame> {
-    metrics: MetricsRange,
+pub struct Frame {
+    pub symbol: SymbolInfo,
+    pub metrics: MetricsRange,
     // INVARIANT: sum of time, cycles, and insn across all children must equal this frame's time, cycles, and insn
-    chunks: Vec<Chunk<F>>,
+    chunks: Vec<Chunk>,
 }
 
-impl<F: Frame> Display for RootFrame<F> {
+impl Display for Frame {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "Unnamed Frame ({} - {})",
-            self.metrics.start, self.metrics.end
+            "{} ({} - {})",
+            self.symbol, self.metrics.start, self.metrics.end
         )
     }
 }
 
-impl<F: Frame> Frame for RootFrame<F> {
-    type ChildFrame = F;
-
-    #[inline]
-    fn metrics(&self) -> &MetricsRange {
-        &self.metrics
+impl Frame {
+    pub fn new(metrics: MetricsRange, symbol: SymbolInfo) -> Self {
+        Self {
+            symbol,
+            metrics,
+            chunks: vec![Chunk::Straightline(metrics)],
+        }
     }
 
-    #[inline]
-    fn metrics_mut(&mut self) -> &mut MetricsRange {
-        &mut self.metrics
-    }
-
-    fn add_child(&mut self, child: Self::ChildFrame) -> Result<(), Error> {
+    pub fn insert_chunk(&mut self, chunk: Chunk) -> Result<(), Error> {
         for mut i in 0..self.chunks.len() {
             match self.chunks[i] {
-                Chunk::Frame(_) => continue,
                 Chunk::Straightline(straightline) => {
-                    if straightline.metrics.includes_range(&child.metrics()) {
-                        if child.metrics().start != straightline.metrics.start {
-                            let before = Straightline {
-                                metrics: MetricsRange::new(
-                                    straightline.metrics.start,
-                                    child.metrics().start,
-                                ),
-                            };
-                            self.chunks.insert(i, before.into());
+                    if straightline.includes_range(&chunk.metrics()) {
+                        if chunk.metrics().start != straightline.start {
+                            let before =
+                                MetricsRange::new(straightline.start, chunk.metrics().start);
+                            self.chunks.insert(i, Chunk::Straightline(before));
                             i += 1;
                         }
-                        if child.metrics().end != straightline.metrics.end {
-                            let after = Straightline {
-                                metrics: MetricsRange::new(
-                                    child.metrics().end,
-                                    straightline.metrics.end,
-                                ),
-                            };
-                            self.chunks.insert(i + 1, after.into());
+                        if chunk.metrics().end != straightline.end {
+                            let after = MetricsRange::new(chunk.metrics().end, straightline.end);
+                            self.chunks.insert(i + 1, Chunk::Straightline(after));
                         }
-                        self.chunks[i] = child.into();
+                        self.chunks[i] = chunk;
                         return Ok(());
                     }
                 }
+                Chunk::Frame(_) | Chunk::Pause(_) => continue,
             }
         }
 
-        if child.metrics().total_time() == 0
-            && child.metrics().total_cycles() == 0
-            && child.metrics().total_insn() == 0
+        if chunk.metrics().total_time() == 0
+            && chunk.metrics().total_cycles() == 0
+            && chunk.metrics().total_insn() == 0
         {
-            if child.metrics().start == self.metrics.start {
-                self.chunks.insert(0, child.into());
+            if chunk.metrics().start == self.metrics.start {
+                self.chunks.insert(0, chunk);
                 return Ok(());
-            } else if child.metrics().end == self.metrics.end {
-                self.chunks.push(child.into());
+            } else if chunk.metrics().end == self.metrics.end {
+                self.chunks.push(chunk);
                 return Ok(());
             }
         }
 
-        Err(Error::InvalidRange(child.metrics().clone()))
+        Err(Error::InvalidRange(chunk.metrics().clone()))
     }
 
-    fn chunks(&self) -> &[Chunk<Self::ChildFrame>] {
+    pub fn add_child(&mut self, child: Frame) -> Result<(), Error> {
+        self.insert_chunk(child.into())
+    }
+
+    pub fn add_pause(&mut self, pause: MetricsRange) -> Result<(), Error> {
+        self.insert_chunk(Chunk::Pause(pause))
+    }
+
+    #[inline]
+    pub fn chunks(&self) -> &[Chunk] {
         &self.chunks
-    }
-}
-
-impl<F: Frame> RootFrame<F> {
-    pub fn new(metrics: MetricsRange) -> Self {
-        Self {
-            metrics,
-            chunks: vec![Chunk::Straightline(Straightline { metrics })],
-        }
     }
 
     pub fn check_invariant(&self) -> bool {
@@ -148,109 +122,36 @@ impl<F: Frame> RootFrame<F> {
         let mut total_cycles = 0;
         let mut total_insn = 0;
         for chunk in self.chunks() {
-            total_time += chunk.total_time();
-            total_cycles += chunk.total_cycles();
-            total_insn += chunk.total_insn();
+            total_time += chunk.metrics().total_time();
+            total_cycles += chunk.metrics().total_cycles();
+            total_insn += chunk.metrics().total_insn();
         }
 
-        total_time == self.metrics().total_time()
-            && total_cycles == self.metrics().total_cycles()
-            && total_insn == self.metrics().total_insn()
+        total_time == self.metrics.total_time()
+            && total_cycles == self.metrics.total_cycles()
+            && total_insn == self.metrics.total_insn()
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct NamedFrame {
-    pub symbol: SymbolInfo,
-    inner: RootFrame<NamedFrame>,
+pub enum Chunk {
+    Frame(Frame),
+    Straightline(MetricsRange),
+    Pause(MetricsRange),
 }
 
-impl Display for NamedFrame {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "{} ({} - {})",
-            self.symbol,
-            self.metrics().start,
-            self.metrics().end
-        )
-    }
-}
-
-impl Frame for NamedFrame {
-    type ChildFrame = NamedFrame;
-
-    #[inline]
-    fn metrics(&self) -> &MetricsRange {
-        self.inner.metrics()
-    }
-
-    #[inline]
-    fn metrics_mut(&mut self) -> &mut MetricsRange {
-        self.inner.metrics_mut()
-    }
-
-    #[inline]
-    fn add_child(&mut self, child: Self::ChildFrame) -> Result<(), Error> {
-        self.inner.add_child(child)
-    }
-
-    #[inline]
-    fn chunks(&self) -> &[Chunk<Self::ChildFrame>] {
-        &self.inner.chunks()
-    }
-}
-
-impl NamedFrame {
-    pub fn new(metrics: MetricsRange, symbol: SymbolInfo) -> Self {
-        Self {
-            symbol,
-            inner: RootFrame::new(metrics),
-        }
-    }
-
-    pub fn check_invariant(&self) -> bool {
-        self.inner.check_invariant()
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum Chunk<F: Frame> {
-    Frame(F),
-    Straightline(Straightline),
-}
-
-impl<F: Frame> Chunk<F> {
-    pub fn total_time(&self) -> u64 {
+impl Chunk {
+    pub fn metrics(&self) -> &MetricsRange {
         match self {
-            Chunk::Frame(frame) => frame.metrics().total_time(),
-            Chunk::Straightline(straightline) => straightline.metrics.total_time(),
-        }
-    }
-
-    pub fn total_cycles(&self) -> u64 {
-        match self {
-            Chunk::Frame(frame) => frame.metrics().total_cycles(),
-            Chunk::Straightline(straightline) => straightline.metrics.total_cycles(),
-        }
-    }
-
-    pub fn total_insn(&self) -> u64 {
-        match self {
-            Chunk::Frame(frame) => frame.metrics().total_insn(),
-            Chunk::Straightline(straightline) => straightline.metrics.total_insn(),
+            Chunk::Frame(frame) => &frame.metrics,
+            Chunk::Straightline(straightline) => &straightline,
+            Chunk::Pause(pause) => &pause,
         }
     }
 }
 
-impl<F: Frame> From<Straightline> for Chunk<F> {
-    fn from(straightline: Straightline) -> Self {
-        Chunk::Straightline(straightline)
-    }
-}
-
-impl<F: Frame> From<F> for Chunk<F> {
-    fn from(frame: F) -> Self {
+impl From<Frame> for Chunk {
+    fn from(frame: Frame) -> Self {
         Chunk::Frame(frame)
     }
 }
@@ -303,16 +204,16 @@ impl Event {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Trace {
-    root: RootFrame<NamedFrame>,
+    root: Frame,
     events: Vec<Event>,
 }
 
 impl Trace {
-    pub fn new(root: RootFrame<NamedFrame>, events: Vec<Event>) -> Self {
+    pub fn new(root: Frame, events: Vec<Event>) -> Self {
         Self { root, events }
     }
 
-    pub fn root_frame(&self) -> &RootFrame<NamedFrame> {
+    pub fn root_frame(&self) -> &Frame {
         &self.root
     }
 
