@@ -217,6 +217,12 @@ impl Sum for Metrics {
     }
 }
 
+impl<'a> Sum<&'a Metrics> for Metrics {
+    fn sum<I: Iterator<Item = &'a Self>>(iter: I) -> Self {
+        iter.fold(Metrics::constant(0), |acc, x| acc + *x)
+    }
+}
+
 impl Display for Metrics {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(

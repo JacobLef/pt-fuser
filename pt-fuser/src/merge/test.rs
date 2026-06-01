@@ -1,7 +1,7 @@
 use std::sync::LazyLock;
 
 use crate::{
-    merge::{self, FrameIndexed, Id},
+    merge::{self, Id},
     trace::{
         Event, Frame, SymbolInfo, Trace,
         metrics::{Metrics, MetricsRange},
@@ -41,50 +41,71 @@ impl Id for TestLCS {
     }
 }
 
-fn produce_frames_from_symbols(symbols: &[&str]) -> Frame {
+impl Id for &TestLCS {
+    fn id(&self) -> u32 {
+        self.id
+    }
+}
+
+// special symbol called "[pause]" represents a pause chunk
+fn produce_chunks_from_symbols(symbols: &[&str]) -> Frame {
     let mut frame = Frame::new(DUMMY_RANGE, DUMMY_SYMBOL.clone());
     for (i, &symbol) in symbols.iter().enumerate() {
-        frame
-            .add_child(Frame::new(
-                MetricsRange {
-                    start: Metrics::new(100 + i as u64, 100 + i as u64, 100 + i as u64),
-                    end: Metrics::new(101 + i as u64, 101 + i as u64, 101 + i as u64),
-                },
-                SymbolInfo {
-                    name: symbol.to_string(),
-                    offset: 1,
-                    size: 1,
-                },
-            ))
-            .expect(&format!("Failed to add child '{}' to frame", symbol));
+        let range = MetricsRange {
+            start: Metrics::new(100 + i as u64, 100 + i as u64, 100 + i as u64),
+            end: Metrics::new(101 + i as u64, 101 + i as u64, 101 + i as u64),
+        };
+        if symbol == "[pause]" {
+            frame
+                .add_pause(range)
+                .expect("Failed to add pause to frame");
+        } else {
+            frame
+                .add_child(Frame::new(
+                    range,
+                    SymbolInfo {
+                        name: symbol.to_string(),
+                        offset: 1,
+                        size: 1,
+                    },
+                ))
+                .expect(&format!("Failed to add child '{}' to frame", symbol));
+        }
     }
     frame
 }
 
-fn produce_frames_from_metrics(
-    root: (u64, u64),
-    children: &[(u64, u64, Option<&SymbolInfo>)],
-) -> Frame {
+// special symbol called "[pause]" represents a pause chunk
+fn produce_frames_from_metrics(root: (u64, u64), children: &[(u64, u64, Option<&str>)]) -> Frame {
     let mut frame = Frame::new(
         MetricsRange::new(Metrics::constant(root.0), Metrics::constant(root.1)),
         DUMMY_SYMBOL.clone(),
     );
     for &(start, end, symbol) in children {
-        frame
-            .add_child(Frame::new(
-                MetricsRange::new(Metrics::constant(start), Metrics::constant(end)),
-                symbol.unwrap_or(&DUMMY_SYMBOL).clone(),
-            ))
-            .expect(&format!(
+        let range = MetricsRange::new(Metrics::constant(start), Metrics::constant(end));
+        if symbol.is_some() && symbol.unwrap() == "[pause]" {
+            frame
+                .add_pause(range)
+                .expect("Failed to add pause to frame");
+        } else {
+            let symbol = symbol
+                .map(|s| SymbolInfo {
+                    name: s.to_string(),
+                    offset: 1,
+                    size: 1,
+                })
+                .unwrap_or(DUMMY_SYMBOL.clone());
+            frame.add_child(Frame::new(range, symbol)).expect(&format!(
                 "Failed to add child with range ({}, {}) to frame",
                 start, end
             ));
+        }
     }
     frame
 }
 
-fn extract_ids(frames: &Vec<FrameIndexed>) -> Vec<u32> {
-    frames.iter().map(|f| f.id).collect()
+fn extract_ids(frames: &[impl Id]) -> Vec<u32> {
+    frames.iter().map(|f| f.id()).collect()
 }
 
 fn seq(xs: &[u32]) -> Vec<TestLCS> {
@@ -100,7 +121,7 @@ fn index_empty() {
 
 #[test]
 fn index_single() {
-    let frame = produce_frames_from_symbols(&["a", "b", "c"]);
+    let frame = produce_chunks_from_symbols(&["a", "b", "c"]);
     let (n, r) = merge::index_children(&[&frame]);
     assert_eq!(n, 3);
     assert_eq!(r.len(), 1);
@@ -109,9 +130,9 @@ fn index_single() {
 
 #[test]
 fn index_3_no_repeat() {
-    let frame1 = produce_frames_from_symbols(&["a", "b", "c", "d"]);
-    let frame2 = produce_frames_from_symbols(&["b", "c", "e", "g", "h", "d"]);
-    let frame3 = produce_frames_from_symbols(&["f", "a", "d", "e"]);
+    let frame1 = produce_chunks_from_symbols(&["a", "b", "c", "d"]);
+    let frame2 = produce_chunks_from_symbols(&["b", "c", "e", "g", "h", "d"]);
+    let frame3 = produce_chunks_from_symbols(&["f", "a", "d", "e"]);
     let (n, r) = merge::index_children(&[&frame1, &frame2, &frame3]);
     assert_eq!(n, 8);
     assert_eq!(r.len(), 3);
@@ -122,15 +143,30 @@ fn index_3_no_repeat() {
 
 #[test]
 fn index_3_repeating() {
-    let frame1 = produce_frames_from_symbols(&["a", "b", "a", "c", "d", "c"]);
-    let frame2 = produce_frames_from_symbols(&["b", "c", "a", "a", "e", "g", "e", "h"]);
-    let frame3 = produce_frames_from_symbols(&["c", "a", "c", "f", "h", "a", "d", "e"]);
+    let frame1 = produce_chunks_from_symbols(&["a", "b", "a", "c", "d", "c"]);
+    let frame2 = produce_chunks_from_symbols(&["b", "c", "a", "a", "e", "g", "e", "h"]);
+    let frame3 = produce_chunks_from_symbols(&["c", "a", "c", "f", "h", "a", "d", "e"]);
     let (n, r) = merge::index_children(&[&frame1, &frame2, &frame3]);
     assert_eq!(n, 11);
     assert_eq!(r.len(), 3);
     assert_eq!(extract_ids(&r[0]), vec![1, 2, 3, 4, 5, 6]);
     assert_eq!(extract_ids(&r[1]), vec![2, 4, 1, 3, 7, 8, 9, 10]);
     assert_eq!(extract_ids(&r[2]), vec![4, 1, 6, 11, 10, 3, 5, 7]);
+}
+
+#[test]
+fn index_3_with_pauses() {
+    let frame1 = produce_chunks_from_symbols(&["a", "b", "[pause]", "a", "[pause]", "c", "d", "c"]);
+    let frame2 = produce_chunks_from_symbols(&["b", "c", "a", "a", "e", "g", "e", "[pause]", "h"]);
+    let frame3 = produce_chunks_from_symbols(&[
+        "[pause]", "[pause]", "c", "a", "c", "f", "[pause]", "h", "a", "d", "e",
+    ]);
+    let (n, r) = merge::index_children(&[&frame1, &frame2, &frame3]);
+    assert_eq!(n, 14);
+    assert_eq!(r.len(), 3);
+    assert_eq!(extract_ids(&r[0]), vec![1, 2, 3, 4, 5, 6, 7, 8]);
+    assert_eq!(extract_ids(&r[1]), vec![2, 6, 1, 4, 9, 10, 11, 3, 12]);
+    assert_eq!(extract_ids(&r[2]), vec![3, 5, 6, 1, 8, 13, 14, 12, 4, 7, 9]);
 }
 
 #[test]
@@ -199,14 +235,14 @@ fn lcs_5_identical() {
 #[should_panic]
 fn common_thresh_0() {
     let seq = seq(&[]);
-    merge::find_frequent_frames(1, &[&seq], -0.1);
+    merge::find_frequent_children(1, &[&seq], &mut |_| {}, -0.1);
 }
 
 #[test]
 #[should_panic]
 fn common_thresh_1() {
     let seq = seq(&[]);
-    merge::find_frequent_frames(1, &[&seq], 1.1);
+    merge::find_frequent_children(1, &[&seq], &mut |_| {}, 1.1);
 }
 
 #[test]
@@ -217,8 +253,10 @@ fn common_simple_none() {
     let seq4 = seq(&[1]);
     let seqs1 = vec![seq1.as_slice(), &seq2, &seq3, &seq4];
     let seqs2 = vec![seq2.as_slice(), &seq1, &seq4, &seq3];
-    let result1 = merge::find_frequent_frames(2, &seqs1, 0.7);
-    let result2 = merge::find_frequent_frames(2, &seqs2, 0.7);
+    let mut result1 = Vec::new();
+    merge::find_frequent_children(2, &seqs1, &mut |x| result1.push(extract_ids(x)), 0.7);
+    let mut result2 = Vec::new();
+    merge::find_frequent_children(2, &seqs2, &mut |x| result2.push(extract_ids(x)), 0.7);
     assert_eq!(result1.len(), 0);
     assert_eq!(result2.len(), 0);
 }
@@ -228,12 +266,14 @@ fn common_simple_one() {
     let seq1 = seq(&[1]);
     let seq2 = seq(&[1]);
     let seq3 = seq(&[]);
-    let seq4 = seq(&[1]);
-    let result = &[1];
+    let seq4 = seq(&[1, 1, 1]);
+    let result = &[vec![1, 1, 1]];
     let seqs1 = vec![seq1.as_slice(), &seq2, &seq3, &seq4];
     let seqs2 = vec![seq2.as_slice(), &seq1, &seq4, &seq3];
-    let result1 = merge::find_frequent_frames(1, &seqs1, 0.7);
-    let result2 = merge::find_frequent_frames(1, &seqs2, 0.7);
+    let mut result1 = Vec::new();
+    merge::find_frequent_children(1, &seqs1, &mut |x| result1.push(extract_ids(x)), 0.7);
+    let mut result2 = Vec::new();
+    merge::find_frequent_children(1, &seqs2, &mut |x| result2.push(extract_ids(x)), 0.7);
     assert_eq!(result1, result);
     assert_eq!(result2, result);
 }
@@ -244,11 +284,13 @@ fn common_three1() {
     let seq2 = seq(&[7, 1, 8, 9, 2, 10, 3]);
     let seq3 = seq(&[6, 1, 10, 5, 3, 11]);
     let seq4 = seq(&[11, 2, 12, 4, 3]);
-    let answer = &[1, 2, 3];
+    let answer = &[vec![1, 1, 1], vec![2, 2, 2], vec![3, 3, 3, 3]];
     let seqs1 = vec![seq1.as_slice(), &seq2, &seq3, &seq4];
     let seqs2 = vec![seq2.as_slice(), &seq1, &seq4, &seq3];
-    let result1 = merge::find_frequent_frames(12, &seqs1, 0.7);
-    let result2 = merge::find_frequent_frames(12, &seqs2, 0.7);
+    let mut result1 = Vec::new();
+    let mut result2 = Vec::new();
+    merge::find_frequent_children(12, &seqs1, &mut |x| result1.push(extract_ids(x)), 0.7);
+    merge::find_frequent_children(12, &seqs2, &mut |x| result2.push(extract_ids(x)), 0.7);
     assert_eq!(result1, answer);
     assert_eq!(result2, answer);
 }
@@ -259,11 +301,13 @@ fn common_three2() {
     let seq2 = seq(&[8, 2, 10, 4, 12, 13, 14]);
     let seq3 = seq(&[15, 16, 17, 18, 4, 7, 21]);
     let seq4 = seq(&[22, 23, 24, 2, 4, 7, 28]);
-    let answer = &[2, 4, 7];
+    let answer = &[vec![2, 2, 2], vec![4, 4, 4, 4], vec![7, 7, 7]];
     let seqs1 = vec![seq1.as_slice(), &seq2, &seq3, &seq4];
     let seqs2 = vec![seq2.as_slice(), &seq1, &seq4, &seq3];
-    let result1 = merge::find_frequent_frames(28, &seqs1, 0.7);
-    let result2 = merge::find_frequent_frames(28, &seqs2, 0.7);
+    let mut result1 = Vec::new();
+    merge::find_frequent_children(28, &seqs1, &mut |x| result1.push(extract_ids(x)), 0.7);
+    let mut result2 = Vec::new();
+    merge::find_frequent_children(28, &seqs2, &mut |x| result2.push(extract_ids(x)), 0.7);
     assert_eq!(result1, answer);
     assert_eq!(result2, answer);
 }
@@ -276,11 +320,13 @@ fn common_slicing_heuristic() {
     let seq4 = seq(&[18, 19, 20, 4, 5, 22]);
     // [1, 4] and [4, 5] are both decent answers, but heuristics will
     // cust seq3 into [12, 13, 14] and [15, 5, 1], so [4, 5] will be chosen
-    let answer = &[4, 5];
+    let answer = &[vec![4, 4, 4], vec![5, 5, 5]];
     let seqs1 = vec![seq1.as_slice(), &seq2, &seq3, &seq4];
     let seqs2 = vec![seq2.as_slice(), &seq1, &seq4, &seq3];
-    let result1 = merge::find_frequent_frames(22, &seqs1, 0.7);
-    let result2 = merge::find_frequent_frames(22, &seqs2, 0.7);
+    let mut result1 = Vec::new();
+    merge::find_frequent_children(22, &seqs1, &mut |x| result1.push(extract_ids(x)), 0.7);
+    let mut result2 = Vec::new();
+    merge::find_frequent_children(22, &seqs2, &mut |x| result2.push(extract_ids(x)), 0.7);
     assert_eq!(result1, answer);
     assert_eq!(result2, answer);
 }
@@ -332,48 +378,28 @@ fn merge_traces_common_children() {
 
 #[test]
 fn merge_frame_frequent_children() {
-    let common = SymbolInfo {
-        name: "common".to_string(),
-        offset: 1,
-        size: 1,
-    };
-    let a = SymbolInfo {
-        name: "a".to_string(),
-        offset: 1,
-        size: 1,
-    };
-    let b = SymbolInfo {
-        name: "b".to_string(),
-        offset: 1,
-        size: 1,
-    };
-    let c = SymbolInfo {
-        name: "c".to_string(),
-        offset: 1,
-        size: 1,
-    };
     let frame1 = produce_frames_from_metrics(
         (500, 590),
         &[
-            (540, 541, Some(&common)),
-            (510, 518, Some(&a)),
-            (560, 570, Some(&c)),
+            (540, 541, Some("common")),
+            (510, 518, Some("a")),
+            (560, 570, Some("c")),
         ],
     );
     let frame2 = produce_frames_from_metrics(
         (300, 380),
         &[
-            (340, 341, Some(&common)),
-            (314, 324, Some(&a)),
-            (354, 364, Some(&b)),
+            (340, 341, Some("common")),
+            (314, 324, Some("a")),
+            (354, 364, Some("b")),
         ],
     );
     let frame3 = produce_frames_from_metrics(
         (400, 464),
         &[
-            (440, 441, Some(&common)),
-            (450, 456, Some(&b)),
-            (400, 410, Some(&c)),
+            (440, 441, Some("common")),
+            (450, 456, Some("b")),
+            (400, 410, Some("c")),
         ],
     );
     let mut merged = Frame::new(
@@ -401,15 +427,86 @@ fn merge_frame_frequent_children() {
         ) => {
             assert_eq!(child_frame1.metrics.start, Metrics::constant(50 + 12));
             assert_eq!(child_frame1.metrics.end, Metrics::constant(50 + 12 + 9));
-            assert_eq!(child_frame1.symbol, a);
+            assert_eq!(child_frame1.symbol.name, "a");
             assert_eq!(child_frame2.metrics.start, Metrics::constant(50 + 40));
             assert_eq!(child_frame2.metrics.end, Metrics::constant(50 + 40 + 1));
-            assert_eq!(child_frame2.symbol, common);
+            assert_eq!(child_frame2.symbol.name, "common");
             assert_eq!(child_frame3.metrics.start, Metrics::constant(50 + 52));
             assert_eq!(child_frame3.metrics.end, Metrics::constant(50 + 52 + 8));
-            assert_eq!(child_frame3.symbol, b);
+            assert_eq!(child_frame3.symbol.name, "b");
         }
         _ => panic!("Expected children to be framesi"),
+    }
+}
+
+#[test]
+fn merge_frame_with_pauses() {
+    let frame1 = produce_frames_from_metrics(
+        (500, 600),
+        &[
+            (510, 520, Some("a")),
+            (530, 540, Some("[pause]")),
+            (550, 560, Some("[pause]")),
+            (580, 590, Some("b")),
+        ],
+    );
+    let frame2 = produce_frames_from_metrics(
+        (300, 400),
+        &[
+            (310, 320, Some("b")),
+            (330, 340, Some("[pause]")),
+            (350, 360, Some("[pause]")),
+            (380, 390, Some("c")),
+        ],
+    );
+    let frame3 = produce_frames_from_metrics(
+        (100, 300),
+        &[
+            (130, 150, Some("a")),
+            (160, 180, Some("[pause]")),
+            (250, 260, Some("c")),
+        ],
+    );
+    let mut merged = Frame::new(
+        MetricsRange::new(
+            Metrics::constant(0),
+            Metrics::constant(133),
+        ),
+        DUMMY_SYMBOL.clone(),
+    );
+    merge::merge_children(
+        &mut merged,
+        &[&frame1, &frame2, &frame3],
+        &mut Vec::new(),
+        0.6,
+    );
+    // result: "a" "[pause]" "[pause]" "c"
+    // where the two pause chunks are contiguous
+
+    assert_eq!(merged.chunks().len(), 8);
+    let a = &merged.chunks()[1];
+    let pause1 = &merged.chunks()[3];
+    let pause2 = &merged.chunks()[4];
+    let c = &merged.chunks()[6];
+    match (a, pause1, pause2, c) {
+        (
+            merge::Chunk::Frame(a),
+            merge::Chunk::Pause(pause1),
+            merge::Chunk::Pause(pause2),
+            merge::Chunk::Frame(c),
+        ) => {
+            assert_eq!(a.metrics.start, Metrics::constant(20));
+            assert_eq!(a.metrics.end, Metrics::constant(20 + 15));
+            assert_eq!(a.symbol.name, "a");
+            assert_eq!(pause1.start, Metrics::constant(40));
+            assert_eq!(pause1.end, Metrics::constant(40 + 13));
+            assert_eq!(pause2.start, Metrics::constant(53));
+            assert_eq!(pause2.end, Metrics::constant(53 + 10 - 3));
+            assert_eq!(c.metrics.start, Metrics::constant(115));
+            assert_eq!(c.metrics.end, Metrics::constant(115 + 10));
+            assert_eq!(c.symbol.name, "c");
+        }
+        _ => panic!("Expected children to be a pattern of frames and pauses"),
     }
 }
 

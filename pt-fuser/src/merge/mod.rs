@@ -24,6 +24,8 @@ const FREQUENT_FRAME_THRESH: f32 = 0.7;
 /// (each instance of a child frame as a unique entity). Merging becomes first finding
 /// the longest common subsequence of these strings. In general, this problem is NP-hard
 /// for multiple strings, but for strings with unique characters, it becomes poly-time.
+/// 
+/// Note: pause chunks are treated identically to frame chunks.
 ///
 /// ### Example:
 /// a() := [f(), x(), y(), g(), z(), f(), h()] => "f1 x y g z f2 h"  \
@@ -128,15 +130,48 @@ struct FrameIndexed<'a> {
     id: u32,
 }
 
-impl Id for FrameIndexed<'_> {
+#[derive(Clone, Copy)]
+struct PauseIndexed<'a> {
+    original: &'a MetricsRange,
+    offset_in_parent: Metrics,
+    // unique within a parent frame, stable across parent frames
+    id: u32,
+}
+
+#[derive(Clone, Copy)]
+enum IndexedChild<'a> {
+    Frame(FrameIndexed<'a>),
+    Pause(PauseIndexed<'a>),
+}
+
+impl Id for IndexedChild<'_> {
     fn id(&self) -> u32 {
-        self.id
+        match self {
+            IndexedChild::Frame(f) => f.id,
+            IndexedChild::Pause(p) => p.id,
+        }
+    }
+}
+
+impl IndexedChild<'_> {
+    fn offset_in_parent(&self) -> &Metrics {
+        match self {
+            IndexedChild::Frame(f) => &f.offset_in_parent,
+            IndexedChild::Pause(p) => &p.offset_in_parent,
+        }
+    }
+
+    fn metrics(&self) -> &MetricsRange {
+        match self {
+            IndexedChild::Frame(f) => &f.original.metrics,
+            IndexedChild::Pause(p) => p.original,
+        }
     }
 }
 
 #[derive(Hash, Eq, PartialEq)]
 struct IdMapKey<'a> {
-    symbol: &'a str,
+    symbol: Option<&'a str>, // None signifies a Pause chunk
     instance: u32,
 }
 
@@ -148,13 +183,15 @@ struct IdMapKey<'a> {
 ///
 /// Returns N and a list of lists of indexed frames. Each list of indexed frames
 /// corresponds to the child frames of the original frame.
-fn index_children<'a>(frames: &[&'a Frame]) -> (u32, Vec<Vec<FrameIndexed<'a>>>) {
+fn index_children<'a>(frames: &[&'a Frame]) -> (u32, Vec<Vec<IndexedChild<'a>>>) {
     let mut indexed_children = Vec::with_capacity(frames.len());
     let mut symbol_ids: HashMap<IdMapKey, u32> = HashMap::new();
-    let mut seen_symbols: HashMap<&str, u32> = HashMap::new();
     let mut next_id = 0;
 
     for &parent in frames {
+        let mut seen_symbols: HashMap<&str, u32> = HashMap::new();
+        let mut seen_pauses = 0;
+
         let mut children = Vec::new();
         for chunk in parent.chunks() {
             match chunk {
@@ -164,7 +201,7 @@ fn index_children<'a>(frames: &[&'a Frame]) -> (u32, Vec<Vec<FrameIndexed<'a>>>)
                         .and_modify(|x| *x += 1)
                         .or_insert(0);
                     let key = IdMapKey {
-                        symbol: &frame.symbol.name,
+                        symbol: Some(&frame.symbol.name),
                         instance: *instance,
                     };
                     let id = symbol_ids.entry(key).or_insert_with(|| {
@@ -172,17 +209,33 @@ fn index_children<'a>(frames: &[&'a Frame]) -> (u32, Vec<Vec<FrameIndexed<'a>>>)
                         next_id
                     });
 
-                    children.push(FrameIndexed {
+                    children.push(IndexedChild::Frame(FrameIndexed {
                         original: frame,
                         offset_in_parent: frame.metrics.start - parent.metrics.start,
                         id: *id,
+                    }));
+                }
+                Chunk::Pause(metrics) => {
+                    let key = IdMapKey {
+                        symbol: None,
+                        instance: seen_pauses,
+                    };
+                    seen_pauses += 1;
+                    let id = symbol_ids.entry(key).or_insert_with(|| {
+                        next_id += 1;
+                        next_id
                     });
+
+                    children.push(IndexedChild::Pause(PauseIndexed {
+                        original: &metrics,
+                        offset_in_parent: metrics.start - parent.metrics.start,
+                        id: *id,
+                    }));
                 }
                 _ => continue,
             }
         }
         indexed_children.push(children);
-        seen_symbols.clear();
     }
 
     (next_id, indexed_children)
@@ -247,18 +300,25 @@ fn find_lcs<I: Id>(n: u32, sequences: &[&[I]]) -> Vec<u32> {
 }
 
 /// Checks if any Id appears in at least thresh% of sequences.
-/// If so, adds the Id with the highest frequency to the result and then
-/// recurses on the section of the sequences before and after that Id.
+/// If so, calls process_child() with all the frames containing that Id and
+/// recurses on the part of the sequences before and after that Id.
 /// `sequences` is a list of sequences, where each sequence is a list of items
 /// with unique ids from 1..n.
 ///
+/// process_child() is guarenteed to be called in original order. E.g., if the input sequences
+/// are "a b c", "x, b, c", and "a, b, x", it will be called on "a" then "b" then "c".
+///
 /// Panics if `thresh` is not between 0 and 1
-fn find_frequent_frames<I: Id>(n: u32, sequences: &[&[I]], thresh: f32) -> Vec<u32> {
+fn find_frequent_children<I: Id>(
+    n: u32,
+    sequences: &[&[I]],
+    process_child: &mut impl FnMut(&[&I]) -> (),
+    thresh: f32,
+) {
     if thresh < 0.0 || thresh > 1.0 {
         panic!("Threshold must be between 0 and 1");
     }
 
-    let mut result = Vec::new();
     // counts[i] is None if id=(i + 1) does not appear in any sequence
     // otherwise, it is (count, item.id(), index_cum)
     // if id=(i + 1) appears at index j out of length k, then index_cum += j / k
@@ -285,12 +345,14 @@ fn find_frequent_frames<I: Id>(n: u32, sequences: &[&[I]], thresh: f32) -> Vec<u
         if (count as f32) / (sequences.len() as f32) >= thresh {
             let index_avg = index_sum / (count as f32);
 
+            let mut matching_frames: Vec<&I> = Vec::with_capacity(sequences.len());
             let mut before: Vec<&[I]> = Vec::with_capacity(sequences.len());
             let mut after: Vec<&[I]> = Vec::with_capacity(sequences.len());
             'next_sequence: for i in 0..sequences.len() {
                 let sequence = sequences[i];
                 for (j, ele) in sequence.iter().enumerate() {
                     if ele.id() == id {
+                        matching_frames.push(ele);
                         before.push(&sequence[0..j]);
                         after.push(&sequence[j + 1..]);
                         continue 'next_sequence;
@@ -301,72 +363,33 @@ fn find_frequent_frames<I: Id>(n: u32, sequences: &[&[I]], thresh: f32) -> Vec<u
                 after.push(&sequence[break_point..]);
             }
 
-            result.extend(find_frequent_frames(n, &before, thresh));
-            result.push(id.clone());
-            result.extend(find_frequent_frames(n, &after, thresh));
+            find_frequent_children(n, &before, process_child, thresh);
+            process_child(&matching_frames);
+            find_frequent_children(n, &after, process_child, thresh);
         }
     }
-
-    result
 }
 
-fn add_within_bounds(
-    frame: &mut Frame,
-    mut child: Frame,
-    min_metrics: &mut Metrics,
+fn constrain_metrics(
+    target: &MetricsRange,
+    min_metrics: &Metrics,
     max_metrics: &Metrics,
-    lost_frame_occurrences: &mut Vec<Metrics>,
-) {
-    let original_child_start = child.metrics.start.clone();
-    child.metrics.start.ts = max(child.metrics.start.ts, min_metrics.ts);
-    child.metrics.start.cycles = max(child.metrics.start.cycles, min_metrics.cycles);
-    child.metrics.start.insn_count = max(child.metrics.start.insn_count, min_metrics.insn_count);
-    child.metrics.end.ts = min(child.metrics.end.ts, max_metrics.ts);
-    child.metrics.end.cycles = min(child.metrics.end.cycles, max_metrics.cycles);
-    child.metrics.end.insn_count = min(child.metrics.end.insn_count, max_metrics.insn_count);
-    if child.metrics.start.ts <= child.metrics.end.ts
-        && child.metrics.start.cycles <= child.metrics.end.cycles
-        && child.metrics.start.insn_count <= child.metrics.end.insn_count
+) -> Option<MetricsRange> {
+    let mut result = target.clone();
+    result.start.ts = max(result.start.ts, min_metrics.ts);
+    result.start.cycles = max(result.start.cycles, min_metrics.cycles);
+    result.start.insn_count = max(result.start.insn_count, min_metrics.insn_count);
+    result.end.ts = min(result.end.ts, max_metrics.ts);
+    result.end.cycles = min(result.end.cycles, max_metrics.cycles);
+    result.end.insn_count = min(result.end.insn_count, max_metrics.insn_count);
+    if result.start.ts <= result.end.ts
+        && result.start.cycles <= result.end.cycles
+        && result.start.insn_count <= result.end.insn_count
     {
-        *min_metrics = child.metrics.end;
-        frame
-            .add_child(child)
-            .expect("Adding merged child frame should be valid");
+        Some(result)
     } else {
-        warn!(
-            "At {}, Merged child frame {} couldn't be added to parent {}",
-            original_child_start, child, frame
-        );
-        lost_frame_occurrences.push(original_child_start);
+        None
     }
-}
-
-fn merge_child_recursively(
-    new_parent: &mut Frame,
-    to_merge: &[&Frame],
-    offset_in_parent_sum: Metrics,
-    frequent_thresh: f32,
-    lost_frame_occurrences: &mut Vec<Metrics>,
-) -> Frame {
-    let new_start = new_parent.metrics.start + offset_in_parent_sum / (to_merge.len() as u64);
-    let new_end = new_start
-        + to_merge
-            .iter()
-            .map(|f| f.metrics.end - f.metrics.start)
-            .sum::<Metrics>()
-            / (to_merge.len() as u64);
-    let mut merged = Frame::new(
-        MetricsRange::new(new_start, new_end),
-        to_merge[0].symbol.clone(),
-    );
-
-    merge_children(
-        &mut merged,
-        &to_merge,
-        lost_frame_occurrences,
-        frequent_thresh,
-    );
-    merged
 }
 
 fn merge_children(
@@ -382,21 +405,80 @@ fn merge_children(
     let mut sequences = indexed_children
         .iter()
         .map(|c| c.as_slice())
-        .collect::<Vec<&[FrameIndexed]>>();
+        .collect::<Vec<&[IndexedChild]>>();
+
+    // precondition: `children` is nonempty
+    // precondition: `children` is either all Frame chunks or all Pause chunks
+    let mut add_averaged_child = |children: &[&IndexedChild]| {
+        let offset_sum = children
+            .iter()
+            .map(|c| c.offset_in_parent())
+            .sum::<Metrics>();
+        let new_start = new_parent.metrics.start + offset_sum / (children.len() as u64);
+        let new_end = new_start
+            + children
+                .iter()
+                .map(|f| f.metrics().end - f.metrics().start)
+                .sum::<Metrics>()
+                / (children.len() as u64);
+
+        let new_child_range = MetricsRange::new(new_start, new_end);
+        if let Some(new_child_range) =
+            constrain_metrics(&new_child_range, &min_metrics, &max_metrics)
+        {
+            min_metrics = new_child_range.end;
+
+            match children.first().unwrap() {
+                IndexedChild::Frame(first_frame) => {
+                    let children = children
+                        .iter()
+                        .map(|c| match c {
+                            IndexedChild::Frame(f) => f.original,
+                            IndexedChild::Pause(_) => {
+                                panic!("Expected all children to be Frame chunks")
+                            }
+                        })
+                        .collect::<Vec<&Frame>>();
+
+                    let mut merged_child = Frame::new(
+                        new_child_range,
+                        first_frame.original.symbol.clone(),
+                    );
+                    merge_children(
+                        &mut merged_child,
+                        &children,
+                        lost_frame_occurrences,
+                        frequent_thresh,
+                    );
+                    new_parent
+                        .add_child(merged_child)
+                        .expect("Merged child frame should be valid");
+                }
+                IndexedChild::Pause(_) => {
+                    new_parent
+                        .add_pause(new_child_range)
+                        .expect("Merged pause chunk should be valid");
+                }
+            }
+        } else {
+            warn!(
+                "At {}, merged frame/pause chunk couldn't be added to parent: {}",
+                new_start, new_parent
+            );
+            lost_frame_occurrences.push(new_start);
+        }
+    };
 
     let lcs = find_lcs(n, &sequences);
-
     for id in lcs {
-        let mut common_frames = Vec::with_capacity(sequences.len());
-        let mut common_offset_sum = Metrics::constant(0);
+        let mut common_children = Vec::with_capacity(sequences.len());
         let mut subsequences = Vec::with_capacity(sequences.len());
 
         for sequence in sequences.iter_mut() {
             for i in 0..sequence.len() {
                 let item = &sequence[i];
                 if item.id() == id {
-                    common_frames.push(item.original);
-                    common_offset_sum += item.offset_in_parent;
+                    common_children.push(item);
                     subsequences.push(&sequence[0..i]);
                     *sequence = &sequence[i + 1..];
                     break;
@@ -405,85 +487,12 @@ fn merge_children(
         }
         // INVARIANT: subsequences.len() == sequences.len()
 
-        let freq_frame_ids = find_frequent_frames(n, &subsequences, frequent_thresh);
-        let mut freq_frames = Vec::new();
-        let mut freq_offset_sum = Metrics::constant(0);
-        for freq_id in freq_frame_ids {
-            for sequence in subsequences.iter_mut() {
-                for i in 0..sequence.len() {
-                    let item = &sequence[i];
-                    if item.id() == freq_id {
-                        freq_frames.push(item.original);
-                        freq_offset_sum += item.offset_in_parent;
-                        *sequence = &sequence[i + 1..];
-                        break;
-                    }
-                }
-            }
+        find_frequent_children(n, &subsequences, &mut add_averaged_child, frequent_thresh);
 
-            let merged_freq_frame = merge_child_recursively(
-                new_parent,
-                &freq_frames,
-                freq_offset_sum,
-                frequent_thresh,
-                lost_frame_occurrences,
-            );
-            add_within_bounds(
-                new_parent,
-                merged_freq_frame,
-                &mut min_metrics,
-                &max_metrics,
-                lost_frame_occurrences,
-            );
-        }
-
-        let merged_common_frame = merge_child_recursively(
-            new_parent,
-            &common_frames,
-            common_offset_sum,
-            frequent_thresh,
-            lost_frame_occurrences,
-        );
-        add_within_bounds(
-            new_parent,
-            merged_common_frame,
-            &mut min_metrics,
-            &max_metrics,
-            lost_frame_occurrences,
-        );
+        add_averaged_child(&common_children);
     }
 
-    let freq_frames_ids = find_frequent_frames(n, &sequences, frequent_thresh);
-    let mut freq_frames = Vec::new();
-    let mut freq_offset_sum = Metrics::constant(0);
-    for freq_id in freq_frames_ids {
-        for sequence in sequences.iter_mut() {
-            for i in 0..sequence.len() {
-                let item = &sequence[i];
-                if item.id() == freq_id {
-                    freq_frames.push(item.original);
-                    freq_offset_sum += item.offset_in_parent;
-                    *sequence = &sequence[i + 1..];
-                    break;
-                }
-            }
-        }
-
-        let merged_freq_frame = merge_child_recursively(
-            new_parent,
-            &freq_frames,
-            freq_offset_sum,
-            frequent_thresh,
-            lost_frame_occurrences,
-        );
-        add_within_bounds(
-            new_parent,
-            merged_freq_frame,
-            &mut min_metrics,
-            &max_metrics,
-            lost_frame_occurrences,
-        );
-    }
+    find_frequent_children(n, &sequences, &mut add_averaged_child, frequent_thresh);
 }
 
 fn zip_events(
