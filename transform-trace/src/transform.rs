@@ -64,12 +64,9 @@ impl State {
     }
 }
 
-fn export_trace(state: &mut State, tid: i32, trace: Trace) {
-    let trace_num = state.trace_nums.entry(tid).or_insert(0);
+fn export_trace(output_dir: &str, trace_num: u32, tid: i32, trace: Trace) {
     let filename = format!("trace-{}-{}.bin", tid, trace_num);
-    *trace_num += 1;
-
-    let path = Path::new(&state.output_dir).join(filename);
+    let path = Path::new(output_dir).join(filename);
     let path2 = path.clone();
 
     THREADPOOL
@@ -79,8 +76,6 @@ fn export_trace(state: &mut State, tid: i32, trace: Trace) {
             )
         })
         .execute(move || {
-            info!("Exporting {}...", path.display());
-
             let binary_encoded = trace
                 .bin_serialize(true)
                 .expect("Failed to binary encode trace");
@@ -132,8 +127,10 @@ fn process_return_event(
             .expect("Failed to complete stack frame")
         {
             BuilderResult::Completed(trace) => {
+                let trace_num = state.trace_nums.entry(sample.tid).or_insert(0);
                 info!(
-                    "Completed trace for tid={}. Trace ran from {} to {} and had {} errors.",
+                    "Extracted trace #{} for tid={}. Trace ran from {} to {} and had {} errors.",
+                    trace_num,
                     sample.tid,
                     trace.root_frame().metrics.start.ts,
                     trace.root_frame().metrics.end.ts,
@@ -143,7 +140,9 @@ fn process_return_event(
                         .occurences()
                         .len()
                 );
-                export_trace(state, sample.tid, trace);
+                export_trace(&state.output_dir, *trace_num, sample.tid, trace);
+                *trace_num += 1;
+
                 if i != levels {
                     warn!(
                         "At time {}, tried returning {} levels but trace ended after {} levels.",
