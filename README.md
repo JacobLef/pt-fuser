@@ -11,6 +11,11 @@ Typical workflow is as follows:
 5. *Compare* traces against each other and find candidate regressions
 6. *Export* the `pt-fuser` trace to a [Perfetto](https://ui.perfetto.dev/) trace
 
+> [!Note]
+> The best way to understand why this tool exists and how to use it is to follow our interactive tutorial on investigating a real performance regression in MongoDB.
+> 
+> https://github.com/ethan-vanderheijden/perf-creep-tutorial
+
 ## Installation
 
 After cloning this repo, you can build the project with Rust:
