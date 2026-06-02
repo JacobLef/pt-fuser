@@ -2,7 +2,7 @@ pub struct DataCollectionError;
 
 impl DataCollectionError {
     pub const ID: u32 = 1;
-    pub const NAME: &'static str = "TraceError";
+    pub const NAME: &'static str = "Trace Errors";
     pub const DESC: &'static str = "Trace decoder hit an error. Callstacks may be corrupted.";
 }
 
@@ -10,8 +10,8 @@ pub struct TraceInterrupted;
 
 impl TraceInterrupted {
     pub const ID: u32 = 2710682459;
-    pub const NAME: &'static str = "Interrupt";
-    pub const DESC: &'static str = "Trace was paused while the CPU serviced an interrupt.";
+    pub const NAME: &'static str = "Async Interrupts";
+    pub const DESC: &'static str = "Trace was paused while the CPU serviced an asynchronous interrupt.";
 }
 
 pub struct LostFrameWhileMerging;
