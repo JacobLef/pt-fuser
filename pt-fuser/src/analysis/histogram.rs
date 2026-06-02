@@ -122,7 +122,7 @@ impl<'a> eframe::App for HistogramApp<'a> {
                     ui.heading(&self.name);
                     let (min, q1, median, q3, max) = compute_quartiles(self.data);
                     ui.label(format!(
-                        "Min: {:.0}, Q1: {:.0}, Median: {:.0}, Q3: {:.0}, Max: {:.0}",
+                        "Min: {:.1}, Q1: {:.1}, Median: {:.1}, Q3: {:.1}, Max: {:.1}",
                         min, q1, median, q3, max
                     ));
                 });

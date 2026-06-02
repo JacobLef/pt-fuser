@@ -71,7 +71,9 @@ fn add_histogram_datapoint<'a>(
         }
         Action::Latency => {
             for frame in frames {
-                data.push(frame.metrics.total_time() as f64);
+                let datapoint = frame.metrics.total_time() as f64;
+                let datapoint = datapoint / 1000f64; // convert nanoseconds to microseconds
+                data.push(datapoint);
             }
         }
     }
@@ -130,7 +132,7 @@ fn main() -> eframe::Result<()> {
         Action::Latency => HistogramApp::new(
             format!("Latency Distribution of {} traces", traces.len()),
             &data,
-            "Latency (ns)".into(),
+            "Latency (µnss)".into(),
             "Count".into(),
         ),
         Action::Interrupts => HistogramApp::new(
