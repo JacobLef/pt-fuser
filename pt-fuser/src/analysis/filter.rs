@@ -20,7 +20,7 @@ pub struct Filter {
 
 impl Filter {
     pub const HELP: &'static str = "A filter in the form \"[target=regex,] [min_errors=num,] [max_errors=num,] \
-                                    [min_latency=num,] [max_latency=num,] [min_interrupts=num,] [max_interrupts=num]\". \
+                                    [min_latency=µs,] [max_latency=µs,] [min_interrupts=num,] [max_interrupts=num]\". \
                                     Traces with frames violating a filter are ignored. If target regex is not \
                                     provided, filter applies to root frames.";
 }
@@ -76,6 +76,7 @@ impl FromStr for Filter {
                     filter.min_latency = Some(
                         value
                             .parse::<u64>()
+                            .map(|v| v * 1000) // Convert µs to ns
                             .map_err(|e| format!("Invalid number for min_latency: {}", e))?,
                     );
                 }
@@ -83,6 +84,7 @@ impl FromStr for Filter {
                     filter.max_latency = Some(
                         value
                             .parse::<u64>()
+                            .map(|v| v * 1000) // Convert µs to ns
                             .map_err(|e| format!("Invalid number for max_latency: {}", e))?,
                     );
                 }

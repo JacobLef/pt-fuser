@@ -75,6 +75,10 @@ fn create_histogram(name: &str, data: &[f64]) -> BarChart {
 }
 
 fn compute_quartiles(data: &[f64]) -> (f64, f64, f64, f64, f64) {
+    if data.is_empty() {
+        return (0.0, 0.0, 0.0, 0.0, 0.0);
+    }
+
     let mut sorted = data.to_vec();
     sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let min = *sorted.first().unwrap();
