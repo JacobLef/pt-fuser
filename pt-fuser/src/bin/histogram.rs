@@ -3,7 +3,7 @@ use pt_fuser::{
     analysis::{
         FrameFinder,
         filter::{self, Filter},
-        histogram::HistogramApp,
+        histogram::{Histogram, HistogramASCII},
     },
     trace::{Frame, Trace, trace_error},
 };
@@ -27,6 +27,13 @@ struct Cli {
         help = "Whether the input trace files are gzipped"
     )]
     gzip: bool,
+    #[cfg(feature = "gui")]
+    #[clap(
+        long,
+        default_value_t = false,
+        help = "Show the histogram in a GUI instead of ASCII"
+    )]
+    gui: bool,
     #[clap(
         long,
         help = "A regular expression for filter frames symbols. If not provided, will analyze root frames."
@@ -79,7 +86,7 @@ fn add_histogram_datapoint<'a>(
     }
 }
 
-fn main() -> eframe::Result<()> {
+fn main() {
     let cli = Cli::parse();
 
     let mut traces = cli
@@ -121,30 +128,32 @@ fn main() -> eframe::Result<()> {
         }
     }
 
-    let options = eframe::NativeOptions::default();
-    let app = match cli.action {
-        Action::Errors => HistogramApp::new(
+    let (title, x_axis) = match cli.action {
+        Action::Errors => (
             format!("Error Count Distribution of {} traces", traces.len()),
-            &data,
-            "Error Count".into(),
-            "Count".into(),
+            "Error Count".to_string(),
         ),
-        Action::Latency => HistogramApp::new(
-            format!("Latency Distribution of {} traces", traces.len()),
-            &data,
-            "Latency (µnss)".into(),
-            "Count".into(),
+        Action::Latency => (
+            format!("Latency (µs) Distribution of {} traces", traces.len()),
+            "Latency (µs)".to_string(),
         ),
-        Action::Interrupts => HistogramApp::new(
+        Action::Interrupts => (
             format!("Interrupt Count Distribution of {} traces", traces.len()),
-            &data,
-            "Interrupt Count".into(),
-            "Count".into(),
+            "Interrupt Count".to_string(),
         ),
     };
-    eframe::run_native(
-        "pt-fuser Metric Analysis",
-        options,
-        Box::new(|_cc| Ok(Box::new(app))),
-    )
+
+    #[cfg(feature = "gui")]
+    if cli.gui {
+        use pt_fuser::analysis::histogram::HistogramGUI;
+
+        HistogramGUI::new(title, &data, x_axis)
+            .show()
+            .expect("Failed to show histogram GUI");
+        return;
+    }
+
+    HistogramASCII::new(title, &data, x_axis)
+        .show()
+        .expect("Failed to show histogram ASCII");
 }
