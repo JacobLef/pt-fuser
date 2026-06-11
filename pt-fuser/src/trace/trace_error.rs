@@ -1,3 +1,6 @@
+// Note: in the Perfetto trace, events will be displayed from low ID to high ID
+// the execution trace will always be below all events
+
 pub struct DataCollectionError;
 
 impl DataCollectionError {
@@ -9,7 +12,7 @@ impl DataCollectionError {
 pub struct TraceInterrupted;
 
 impl TraceInterrupted {
-    pub const ID: u32 = 2710682459;
+    pub const ID: u32 = 20;
     pub const NAME: &'static str = "Async Interrupts";
     pub const DESC: &'static str = "Trace was paused while the CPU serviced an asynchronous interrupt.";
 }
@@ -17,7 +20,7 @@ impl TraceInterrupted {
 pub struct LostFrameWhileMerging;
 
 impl LostFrameWhileMerging {
-    pub const ID: u32 = 555740177;
+    pub const ID: u32 = 300;
     pub const NAME: &'static str = "Lost Frames";
     pub const DESC: &'static str =
         "A frame could not be added while merging because it overlapped with adjacent frames.";
