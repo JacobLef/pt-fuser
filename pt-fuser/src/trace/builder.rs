@@ -1,6 +1,6 @@
 use crate::trace::{self, Event, Frame, Metrics, MetricsRange, SymbolInfo, Trace};
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq)]
 struct IncompleteFrame {
     start_metrics: Metrics,
     child_frames: Vec<Frame>,

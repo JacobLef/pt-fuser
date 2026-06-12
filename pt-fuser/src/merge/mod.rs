@@ -6,15 +6,21 @@ use std::{
     collections::{HashMap, HashSet},
 };
 
+use indexmap::IndexMap;
 use tracing::{info, warn};
 
-use crate::trace::{
-    Chunk, Event, Frame, Trace,
-    metrics::{Metrics, MetricsRange},
-    trace_error,
+use crate::{
+    analysis::Stats,
+    trace::{
+        Annotation, Chunk, Event, Frame, Trace,
+        metrics::{Metrics, MetricsRange},
+        trace_error,
+    },
 };
 
 const FREQUENT_FRAME_THRESH: f32 = 0.7;
+const ANNOTATION_COUNT_NAME: &str = "Merging Count";
+const ANNOTATION_STATS_NAME: &str = "Merging Stats";
 
 /// # Merging Algorithm
 ///
@@ -24,7 +30,7 @@ const FREQUENT_FRAME_THRESH: f32 = 0.7;
 /// (each instance of a child frame as a unique entity). Merging becomes first finding
 /// the longest common subsequence of these strings. In general, this problem is NP-hard
 /// for multiple strings, but for strings with unique characters, it becomes poly-time.
-/// 
+///
 /// Note: pause chunks are treated identically to frame chunks.
 ///
 /// ### Example:
@@ -81,15 +87,27 @@ pub fn merge_traces(traces: &[&Trace]) -> Trace {
 
     info!("Merging frames for {} traces...", traces.len());
 
-    let new_end = frames
-        .iter()
-        .map(|f| f.metrics.end - f.metrics.start)
-        .sum::<Metrics>()
-        / (frames.len() as u64);
+    let latencies = frames.iter().map(|f| f.metrics.end - f.metrics.start);
+    let new_end = latencies.clone().sum::<Metrics>() / (frames.len() as u64);
     let mut new_root = Frame::new(
         MetricsRange::new(Metrics::constant(0), new_end),
         traces[0].root_frame().symbol.clone(),
     );
+
+    let ts_latencies = latencies.map(|l| l.ts as f64);
+    new_root.annotations.insert(
+        ANNOTATION_COUNT_NAME.to_string(),
+        Annotation::Uint64(traces.len() as u64),
+    );
+    if let Some(stats) = Stats::from_data(ts_latencies) {
+        let stats = stats
+            .into_iter()
+            .map(|(k, v)| (k, Annotation::Double(v)))
+            .collect::<IndexMap<String, Annotation>>();
+        new_root
+            .annotations
+            .insert(ANNOTATION_STATS_NAME.to_string(), Annotation::Map(stats));
+    }
 
     let mut lost_frame_occurences = Vec::new();
     merge_children(
@@ -394,14 +412,14 @@ fn constrain_metrics(
 
 fn merge_children(
     new_parent: &mut Frame,
-    children: &[&Frame],
+    frames: &[&Frame],
     lost_frame_occurrences: &mut Vec<Metrics>,
     frequent_thresh: f32,
 ) {
     let mut min_metrics = new_parent.metrics.start;
     let max_metrics = new_parent.metrics.end;
 
-    let (n, indexed_children) = index_children(children);
+    let (n, indexed_children) = index_children(frames);
     let mut sequences = indexed_children
         .iter()
         .map(|c| c.as_slice())
@@ -415,12 +433,9 @@ fn merge_children(
             .map(|c| c.offset_in_parent())
             .sum::<Metrics>();
         let new_start = new_parent.metrics.start + offset_sum / (children.len() as u64);
-        let new_end = new_start
-            + children
-                .iter()
-                .map(|f| f.metrics().end - f.metrics().start)
-                .sum::<Metrics>()
-                / (children.len() as u64);
+
+        let latencies = children.iter().map(|f| f.metrics().end - f.metrics().start);
+        let new_end = new_start + latencies.clone().sum::<Metrics>() / (children.len() as u64);
 
         let new_child_range = MetricsRange::new(new_start, new_end);
         if let Some(new_child_range) =
@@ -430,6 +445,7 @@ fn merge_children(
 
             match children.first().unwrap() {
                 IndexedChild::Frame(first_frame) => {
+                    // convert children from Vec<&IndexedChild> to Vec<&Frame>
                     let children = children
                         .iter()
                         .map(|c| match c {
@@ -440,16 +456,30 @@ fn merge_children(
                         })
                         .collect::<Vec<&Frame>>();
 
-                    let mut merged_child = Frame::new(
-                        new_child_range,
-                        first_frame.original.symbol.clone(),
-                    );
+                    let mut merged_child =
+                        Frame::new(new_child_range, first_frame.original.symbol.clone());
                     merge_children(
                         &mut merged_child,
                         &children,
                         lost_frame_occurrences,
                         frequent_thresh,
                     );
+
+                    let ts_latencies = latencies.map(|l| l.ts as f64);
+                    merged_child.annotations.insert(
+                        ANNOTATION_COUNT_NAME.to_string(),
+                        Annotation::Uint64(children.len() as u64),
+                    );
+                    if let Some(stats) = Stats::from_data(ts_latencies) {
+                        let stats = stats
+                            .into_iter()
+                            .map(|(k, v)| (k, Annotation::Double(v)))
+                            .collect::<IndexMap<String, Annotation>>();
+                        merged_child
+                            .annotations
+                            .insert(ANNOTATION_STATS_NAME.to_string(), Annotation::Map(stats));
+                    }
+
                     new_parent
                         .add_child(merged_child)
                         .expect("Merged child frame should be valid");

@@ -1,4 +1,7 @@
-use std::fmt::Display;
+use crate::analysis::Stats;
+
+#[cfg(feature = "gui")]
+pub use gui::HistogramGUI;
 
 pub trait Histogram {
     type Error;
@@ -67,66 +70,9 @@ impl Iterator for Bins {
     }
 }
 
-struct Quartiles {
-    min: f64,
-    q1: f64,
-    median: f64,
-    q3: f64,
-    max: f64,
-}
-
-impl Quartiles {
-    fn from_data(data: &[f64]) -> Self {
-        if data.is_empty() {
-            return Quartiles {
-                min: 0.0,
-                q1: 0.0,
-                median: 0.0,
-                q3: 0.0,
-                max: 0.0,
-            };
-        }
-
-        let mut sorted = data.to_vec();
-        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        let min = *sorted.first().unwrap();
-        let max = *sorted.last().unwrap();
-        let (q1, median, q3) = if sorted.len() % 2 == 0 {
-            (
-                sorted[sorted.len() / 4],
-                sorted[sorted.len() / 2],
-                sorted[3 * sorted.len() / 4],
-            )
-        } else {
-            (
-                (sorted[sorted.len() / 4] + sorted[sorted.len() / 4 + 1]) / 2.0,
-                (sorted[sorted.len() / 2] + sorted[sorted.len() / 2 + 1]) / 2.0,
-                (sorted[3 * sorted.len() / 4] + sorted[3 * sorted.len() / 4 + 1]) / 2.0,
-            )
-        };
-        Quartiles {
-            min,
-            q1,
-            median,
-            q3,
-            max,
-        }
-    }
-}
-
-impl Display for Quartiles {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "Min: {:.1}, Q1: {:.1}, Median: {:.1}, Q3: {:.1}, Max: {:.1}",
-            self.min, self.q1, self.median, self.q3, self.max
-        )
-    }
-}
-
 pub struct HistogramASCII {
     bins: Bins,
-    quartiles: Quartiles,
+    quartiles: Option<Stats>,
     name: String,
 }
 
@@ -136,7 +82,7 @@ impl Histogram for HistogramASCII {
     fn new(name: String, data: &[f64], _: String) -> Self {
         Self {
             bins: Bins::from_data(data),
-            quartiles: Quartiles::from_data(data),
+            quartiles: Stats::from_data(data.iter().cloned()),
             name,
         }
     }
@@ -151,7 +97,9 @@ impl Histogram for HistogramASCII {
             .len();
 
         println!("---  {}  ---", self.name);
-        println!("{}\n", self.quartiles);
+        if let Some(quartiles) = self.quartiles {
+            println!("{}\n", quartiles);
+        }
         let mut start = self.bins.start;
         for count in self.bins.counts {
             let end = start + self.bins.step;
@@ -172,11 +120,11 @@ impl Histogram for HistogramASCII {
 mod gui {
     use egui_plot::{Bar, BarChart, Plot};
 
-    use super::{Bins, Histogram, Quartiles};
+    use super::{Bins, Histogram, Stats};
 
     pub struct HistogramGUI {
         bars: Vec<Bar>,
-        quartiles: Quartiles,
+        quartiles: Option<Stats>,
         name: String,
         x_axis: String,
     }
@@ -195,7 +143,7 @@ mod gui {
 
             Self {
                 bars,
-                quartiles: Quartiles::from_data(data),
+                quartiles: Stats::from_data(data.iter().cloned()),
                 name,
                 x_axis,
             }
@@ -218,7 +166,9 @@ mod gui {
                 .show_inside(ui, |ui| {
                     ui.vertical_centered(|ui| {
                         ui.heading(&self.name);
-                        ui.label(self.quartiles.to_string());
+                        if let Some(quartiles) = &self.quartiles {
+                            ui.label(quartiles.to_string());
+                        }
                     });
                     Plot::new(&self.name)
                         .x_axis_label(&self.x_axis)
@@ -242,6 +192,3 @@ mod gui {
         }
     }
 }
-
-#[cfg(feature = "gui")]
-pub use gui::HistogramGUI;

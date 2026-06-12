@@ -9,6 +9,7 @@ use std::{fmt::Display, io::Read};
 
 use flate2::Compression;
 use flexbuffers::FlexbufferSerializer;
+use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 
 use crate::trace::metrics::{Metrics, MetricsRange};
@@ -38,10 +39,26 @@ impl Display for SymbolInfo {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum Annotation {
+    Bool(bool),
+    Uint64(u64),
+    Int64(i64),
+    /// Displayed differently from Uint64 in Perfetto UI
+    Pointer(u64),
+    Double(f64),
+    String(String),
+    Array(Vec<Annotation>),
+    #[serde(with = "indexmap::map::serde_seq")]
+    Map(IndexMap<String, Annotation>),
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Frame {
     pub symbol: SymbolInfo,
     pub metrics: MetricsRange,
+    #[serde(with = "indexmap::map::serde_seq")]
+    pub annotations: IndexMap<String, Annotation>,
     // INVARIANT: sum of time, cycles, and insn across all children must equal this frame's time, cycles, and insn
     chunks: Vec<Chunk>,
 }
@@ -61,6 +78,7 @@ impl Frame {
         Self {
             symbol,
             metrics,
+            annotations: IndexMap::new(),
             chunks: vec![Chunk::Straightline(metrics)],
         }
     }
@@ -133,7 +151,7 @@ impl Frame {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Chunk {
     Frame(Frame),
     Straightline(MetricsRange),

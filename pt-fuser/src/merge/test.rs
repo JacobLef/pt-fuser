@@ -3,7 +3,7 @@ use std::sync::LazyLock;
 use crate::{
     merge::{self, Id},
     trace::{
-        Event, Frame, SymbolInfo, Trace,
+        Annotation, Event, Frame, SymbolInfo, Trace,
         metrics::{Metrics, MetricsRange},
     },
 };
@@ -468,10 +468,7 @@ fn merge_frame_with_pauses() {
         ],
     );
     let mut merged = Frame::new(
-        MetricsRange::new(
-            Metrics::constant(0),
-            Metrics::constant(133),
-        ),
+        MetricsRange::new(Metrics::constant(0), Metrics::constant(133)),
         DUMMY_SYMBOL.clone(),
     );
     merge::merge_children(
@@ -507,6 +504,87 @@ fn merge_frame_with_pauses() {
             assert_eq!(c.symbol.name, "c");
         }
         _ => panic!("Expected children to be a pattern of frames and pauses"),
+    }
+}
+
+#[test]
+fn merge_frame_with_anotations() {
+    let root_frames = vec![
+        produce_frames_from_metrics((0, 100), &[(50, 70, Some("a"))]),
+        produce_frames_from_metrics((0, 98), &[(50, 69, Some("a"))]),
+        produce_frames_from_metrics((0, 96), &[(50, 68, Some("a"))]),
+        produce_frames_from_metrics((0, 94), &[(50, 67, Some("a"))]),
+        produce_frames_from_metrics((0, 92), &[(50, 66, Some("a"))]),
+        produce_frames_from_metrics((0, 90), &[(50, 65, Some("a"))]),
+        produce_frames_from_metrics((0, 88), &[(50, 64, Some("a"))]),
+        produce_frames_from_metrics((0, 86), &[(50, 63, Some("a"))]),
+        produce_frames_from_metrics((0, 84), &[(50, 62, Some("a"))]),
+        produce_frames_from_metrics((0, 82), &[(50, 61, Some("a"))]),
+        produce_frames_from_metrics((0, 80), &[]),
+        produce_frames_from_metrics((0, 78), &[]),
+    ];
+    let traces = root_frames
+        .iter()
+        .map(|frame| Trace::new(frame.clone(), vec![]))
+        .collect::<Vec<_>>();
+    let merged = merge::merge_traces(&traces.iter().collect::<Vec<_>>());
+    assert_eq!(merged.root_frame().chunks().len(), 3);
+
+    let root_anotations = &merged.root_frame().annotations;
+    let root_stats = match &root_anotations[super::ANNOTATION_STATS_NAME] {
+        Annotation::Map(stats) => stats,
+        _ => panic!("Expected stats annotation to be a map"),
+    };
+
+    let child_anotations = match &merged.root_frame().chunks()[1] {
+        merge::Chunk::Frame(child_frame) => &child_frame.annotations,
+        _ => panic!("Expected child to be a frame"),
+    };
+    let child_stats = match &child_anotations[super::ANNOTATION_STATS_NAME] {
+        Annotation::Map(stats) => stats,
+        _ => panic!("Expected stats annotation to be a map"),
+    };
+
+    assert_eq!(
+        root_anotations[super::ANNOTATION_COUNT_NAME],
+        Annotation::Uint64(12)
+    );
+    assert_eq!(root_stats["Min"], Annotation::Double(78.0));
+    assert_eq!(root_stats["Q1"], Annotation::Double(83.0));
+    assert_eq!(root_stats["Median"], Annotation::Double(89.0));
+    assert_eq!(root_stats["Q3"], Annotation::Double(95.0));
+    assert_eq!(root_stats["Max"], Annotation::Double(100.0));
+    assert_eq!(root_stats["Mean"], Annotation::Double(89.0));
+    match &root_stats["Std Dev"] {
+        Annotation::Double(std_dev) => {
+            assert_eq!(
+                (std_dev * 100.0).round(),
+                721.0,
+                "Expected std dev to be approximately 7.21"
+            );
+        }
+        _ => panic!("Expected std dev annotation to be a double"),
+    }
+
+    assert_eq!(
+        child_anotations[super::ANNOTATION_COUNT_NAME],
+        Annotation::Uint64(10)
+    );
+    assert_eq!(child_stats["Min"], Annotation::Double(11.0));
+    assert_eq!(child_stats["Q1"], Annotation::Double(13.0));
+    assert_eq!(child_stats["Median"], Annotation::Double(15.5));
+    assert_eq!(child_stats["Q3"], Annotation::Double(18.0));
+    assert_eq!(child_stats["Max"], Annotation::Double(20.0));
+    assert_eq!(child_stats["Mean"], Annotation::Double(15.5));
+    match &child_stats["Std Dev"] {
+        Annotation::Double(std_dev) => {
+            assert_eq!(
+                (std_dev * 100.0).round(),
+                303.0,
+                "Expected std dev to be approximately 3.03"
+            );
+        }
+        _ => panic!("Expected std dev annotation to be a double"),
     }
 }
 

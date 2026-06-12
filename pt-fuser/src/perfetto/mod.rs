@@ -1,14 +1,16 @@
 use std::collections::HashMap;
 
+use indexmap::IndexMap;
 use perfetto_rust::{
-    EventName, InternedData, TracePacket, TrackDescriptor, TrackEvent,
+    DebugAnnotation, DebugAnnotationName, EventName, InternedData, InternedString, TracePacket,
+    TrackDescriptor, TrackEvent, debug_annotation,
     trace_packet::{Data, OptionalTrustedPacketSequenceId, SequenceFlags},
     track_descriptor::{ChildTracksOrdering, StaticOrDynamicName},
     track_event::{self, NameField},
 };
 use prost::Message;
 
-use crate::trace::{Chunk, Frame, Trace};
+use crate::trace::{Annotation, Chunk, Frame, Trace};
 
 const GLOBAL_TRACK_ID: u64 = 10;
 const GLOBAL_SEQUENCE_ID: u32 = 1;
@@ -58,6 +60,7 @@ fn create_slice_begin(
     sequence_id: u32,
     track_id: u64,
     name: NameField,
+    debug_annotations: Option<Vec<DebugAnnotation>>,
 ) -> TracePacket {
     let mut slice_begin = TracePacket::default();
     slice_begin.optional_trusted_packet_sequence_id = Some(
@@ -70,6 +73,9 @@ fn create_slice_begin(
     slice_begin_event.r#type = Some(track_event::Type::SliceBegin as i32);
     slice_begin_event.track_uuid = Some(track_id);
     slice_begin_event.name_field = Some(name);
+    if let Some(debug_annotations) = debug_annotations {
+        slice_begin_event.debug_annotations = debug_annotations;
+    }
 
     slice_begin.data = Some(Data::TrackEvent(slice_begin_event));
 
@@ -111,6 +117,11 @@ fn create_event(timestamp: u64, event_id: u32) -> TracePacket {
     event
 }
 
+struct StackFrame {
+    iid: u64,
+    annotations: Vec<DebugAnnotation>,
+}
+
 struct Converter {
     interned_names: HashMap<String, u64>,
     last_iid: u64,
@@ -124,39 +135,140 @@ impl Converter {
         }
     }
 
-    fn process_frame(&mut self, frame: &Frame, stack_iid: &mut Vec<u64>) -> Vec<TracePacket> {
+    fn intern_string(&mut self, s: &str) -> (bool, u64) {
+        if let Some(&iid) = self.interned_names.get(s) {
+            (false, iid)
+        } else {
+            self.last_iid += 1;
+            self.interned_names.insert(s.to_string(), self.last_iid);
+            (true, self.last_iid)
+        }
+    }
+
+    /// Precondition: annotation cannot be a Map or an Array
+    fn convert_basic_annotation(
+        &mut self,
+        annotation: &Annotation,
+        interned_data: &mut InternedData,
+    ) -> debug_annotation::Value {
+        match annotation {
+            Annotation::Bool(b) => debug_annotation::Value::BoolValue(*b),
+            Annotation::Uint64(i) => debug_annotation::Value::UintValue(*i),
+            Annotation::Int64(i) => debug_annotation::Value::IntValue(*i),
+            Annotation::Double(d) => debug_annotation::Value::DoubleValue(*d),
+            Annotation::Pointer(p) => debug_annotation::Value::PointerValue(*p),
+            Annotation::String(s) => {
+                let (is_new, iid) = self.intern_string(s);
+                if is_new {
+                    interned_data
+                        .debug_annotation_string_values
+                        .push(InternedString {
+                            iid: Some(iid),
+                            str: Some(s.clone().into_bytes()),
+                        });
+                }
+                debug_annotation::Value::StringValueIid(iid)
+            }
+            _ => panic!("Unsupported annotation type for basic conversion"),
+        }
+    }
+
+    fn convert_annotation_map(
+        &mut self,
+        annotations: &IndexMap<String, Annotation>,
+        interned_data: &mut InternedData,
+    ) -> Vec<DebugAnnotation> {
+        let mut result = Vec::new();
+        for (key, value) in annotations {
+            let (is_new, key_iid) = self.intern_string(key);
+            if is_new {
+                interned_data
+                    .debug_annotation_names
+                    .push(DebugAnnotationName {
+                        iid: Some(key_iid),
+                        name: Some(key.clone()),
+                    });
+            }
+
+            let mut debug_annotation = DebugAnnotation::default();
+            debug_annotation.name_field = Some(debug_annotation::NameField::NameIid(key_iid));
+            match value {
+                Annotation::Map(map) => {
+                    debug_annotation.dict_entries = self.convert_annotation_map(map, interned_data);
+                }
+                Annotation::Array(arr) => {
+                    debug_annotation.array_values =
+                        self.convert_annotation_array(arr, interned_data);
+                }
+                _ => {
+                    debug_annotation.value =
+                        Some(self.convert_basic_annotation(value, interned_data));
+                }
+            }
+            result.push(debug_annotation);
+        }
+        result
+    }
+
+    fn convert_annotation_array(
+        &mut self,
+        annotations: &Vec<Annotation>,
+        interned_data: &mut InternedData,
+    ) -> Vec<DebugAnnotation> {
+        annotations
+            .iter()
+            .map(|elem| {
+                let mut debug_annotation = DebugAnnotation::default();
+                match elem {
+                    Annotation::Map(map) => {
+                        debug_annotation.dict_entries =
+                            self.convert_annotation_map(map, interned_data);
+                    }
+                    Annotation::Array(arr) => {
+                        debug_annotation.array_values =
+                            self.convert_annotation_array(arr, interned_data);
+                    }
+                    _ => {
+                        debug_annotation.value =
+                            Some(self.convert_basic_annotation(elem, interned_data));
+                    }
+                }
+                debug_annotation
+            })
+            .collect()
+    }
+
+    fn process_frame(
+        &mut self,
+        frame: &Frame,
+        stack_iid: &mut Vec<StackFrame>,
+    ) -> Vec<TracePacket> {
         let mut packets = Vec::new();
 
-        let mut intern_data = None;
-        let iid = self
-            .interned_names
-            .get(&frame.symbol.name)
-            .copied()
-            .unwrap_or_else(|| {
-                self.last_iid += 1;
-                self.interned_names
-                    .insert(frame.symbol.name.clone(), self.last_iid);
+        let (is_new, iid) = self.intern_string(&frame.symbol.name);
+        let mut intern_data = InternedData::default();
+        if is_new {
+            intern_data.event_names = vec![EventName {
+                iid: Some(iid),
+                name: Some(frame.symbol.name.clone()),
+            }];
+        }
 
-                let mut new_intern_data = InternedData::default();
-                new_intern_data.event_names = vec![EventName {
-                    iid: Some(self.last_iid),
-                    name: Some(frame.symbol.name.clone()),
-                }];
-                intern_data = Some(new_intern_data);
-
-                self.last_iid
-            });
-
+        let annotations = self.convert_annotation_map(&frame.annotations, &mut intern_data);
         let mut slice_begin = create_slice_begin(
             frame.metrics.start.ts,
             TRACE_SEQUENCE_ID,
             TRACE_TRACK_ID,
             NameField::NameIid(iid),
+            Some(annotations.clone()),
         );
-        slice_begin.interned_data = intern_data;
+        slice_begin.interned_data = Some(intern_data);
         packets.push(slice_begin);
 
-        stack_iid.push(iid);
+        stack_iid.push(StackFrame {
+            iid,
+            annotations: annotations,
+        });
 
         for chunk in frame.chunks() {
             match chunk {
@@ -173,12 +285,13 @@ impl Converter {
                     // previous stack frames resume once pause is over
                     // in Perfetto, this appears as a blank gap, indicating that tracing was paused
                     let resume = metrics.end.ts;
-                    for iid in stack_iid.iter() {
+                    for stack_frame in stack_iid.iter() {
                         let slice_begin = create_slice_begin(
                             resume,
                             TRACE_SEQUENCE_ID,
                             TRACE_TRACK_ID,
-                            NameField::NameIid(*iid),
+                            NameField::NameIid(stack_frame.iid),
+                            Some(stack_frame.annotations.clone()),
                         );
                         packets.push(slice_begin);
                     }
@@ -214,6 +327,7 @@ pub fn convert_to_perfetto(trace: &Trace) -> Vec<u8> {
         GLOBAL_SEQUENCE_ID,
         GLOBAL_TRACK_ID,
         NameField::Name("Overall Latency".to_string()),
+        None,
     ));
     packets.push(create_slice_end(
         trace.root_frame().metrics.end.ts,
@@ -229,7 +343,7 @@ pub fn convert_to_perfetto(trace: &Trace) -> Vec<u8> {
         None,
         Some(GLOBAL_TRACK_ID),
         None,
-        Some(i32::MAX)
+        Some(i32::MAX),
     ));
     packets.extend(converter.process_frame(trace.root_frame(), &mut Vec::new()));
 
