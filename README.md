@@ -4,16 +4,16 @@ This is a tool for processing, merging, and comparing Intel-PT traces.
 
 Typical workflow is as follows:
 
-1. *Collect* an Intel-PT trace of your application using `perf`
-2. *Convert* the trace into `pt-fuser`'s internal format
-3. *Filter* out outliers in latency/error count through high-level analysis
-4. *Merge* multiple traces into one averaged trace
-5. *Compare* traces against each other and find candidate regressions
-6. *Export* the `pt-fuser` trace to a [Perfetto](https://ui.perfetto.dev/) trace
+1. _Collect_ an Intel-PT trace of your application using `perf`
+2. _Convert_ the trace into `pt-fuser`'s internal format
+3. _Filter_ out outliers in latency/error count through high-level analysis
+4. _Merge_ multiple traces into one averaged trace
+5. _Compare_ traces against each other and find candidate regressions
+6. _Export_ the `pt-fuser` trace to a [Perfetto](https://ui.perfetto.dev/) trace
 
 > [!Note]
 > The best way to understand why this tool exists and how to use it is to follow our interactive tutorial on investigating a real performance regression in MongoDB.
-> 
+>
 > https://github.com/ethan-vanderheijden/perf-creep-tutorial
 
 ## Installation
@@ -103,7 +103,7 @@ cargo run --bin merge -- --gzip --filter <FILTER1> --filter <FILTER2> <OUTPUT_FI
 
 ### 5. Compare traces against each other and find candidate regressions
 
-***TODO***: this functionality has yet to be implemented
+**_TODO_**: this functionality has yet to be implemented
 
 ### 6. Exporting the trace to Perfetto
 
